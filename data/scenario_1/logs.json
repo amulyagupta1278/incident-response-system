@@ -1,0 +1,104 @@
+[
+  {
+    "timestamp": "2026-07-07T14:32:15Z",
+    "level": "INFO",
+    "service": "payment-api",
+    "message": "Request processing started for transaction ID 12345"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:16Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "timeout",
+    "message": "Connection timeout while acquiring database connection from pool"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:17Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "timeout",
+    "message": "Connection timeout while acquiring database connection from pool"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:18Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "timeout",
+    "message": "Connection timeout while acquiring database connection from pool"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:19Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "connection_error",
+    "message": "Connection pool exhausted: 30/30 connections in use"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:20Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "timeout",
+    "message": "Connection timeout while acquiring database connection from pool"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:21Z",
+    "level": "CRITICAL",
+    "service": "payment-api",
+    "message": "Circuit breaker opened for database connections"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:22Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "timeout",
+    "message": "Connection timeout while acquiring database connection from pool"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:23Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "timeout",
+    "message": "Connection timeout while acquiring database connection from pool"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:24Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "connection_error",
+    "message": "Failed to process transaction: connection pool unavailable"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:25Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "timeout",
+    "message": "Connection timeout while acquiring database connection from pool"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:26Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "timeout",
+    "message": "Connection timeout while acquiring database connection from pool"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:27Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "timeout",
+    "message": "Connection timeout while acquiring database connection from pool"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:28Z",
+    "level": "ERROR",
+    "service": "payment-api",
+    "error_type": "timeout",
+    "message": "Connection timeout while acquiring database connection from pool"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:29Z",
+    "level": "CRITICAL",
+    "service": "payment-api",
+    "message": "All requests failing: circuit breaker in open state"
+  }
+]

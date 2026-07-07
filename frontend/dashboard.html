@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Operations Command Center</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>AI Operations Command Center</h1>
+            <p>Autonomous Multi-Agent Incident Response System</p>
+        </header>
+
+        <section class="test-scenarios">
+            <h2>Test Scenarios</h2>
+            <div class="scenario-buttons">
+                <button class="btn btn-primary" onclick="triggerScenario(1)">
+                    Scenario 1: DB Pool Exhaustion
+                </button>
+                <button class="btn btn-primary" onclick="triggerScenario(2)">
+                    Scenario 2: Memory Leak
+                </button>
+                <button class="btn btn-primary" onclick="triggerScenario(3)">
+                    Scenario 3: Cascading Failure
+                </button>
+            </div>
+        </section>
+
+        <section class="incidents-section">
+            <h2>Active Incidents</h2>
+            <div id="incidents-list" class="incidents-list">
+                <p class="empty-state">No incidents yet. Click a scenario above to trigger one.</p>
+            </div>
+        </section>
+
+        <div id="loading-indicator" class="loading-indicator hidden">
+            <div class="spinner"></div>
+            <p>Analyzing incident...</p>
+        </div>
+    </div>
+
+    <script>
+        const scenarioConfigs = {
+            1: {
+                service: "payment-api",
+                alert_description: "Database connection pool exhaustion detected",
+                severity: "critical"
+            },
+            2: {
+                service: "order-processor",
+                alert_description: "Memory leak detected - GC pause times increasing",
+                severity: "critical"
+            },
+            3: {
+                service: "checkout-gateway",
+                alert_description: "Cascading failure - downstream service timeout",
+                severity: "critical"
+            }
+        };
+
+        const severityColors = {
+            critical: "#d32f2f",
+            high: "#f57c00",
+            medium: "#fbc02d",
+            low: "#388e3c"
+        };
+
+        async function triggerScenario(scenarioNumber) {
+            const config = scenarioConfigs[scenarioNumber];
+            const loadingIndicator = document.getElementById("loading-indicator");
+            loadingIndicator.classList.remove("hidden");
+
+            try {
+                const response = await fetch("/api/incidents/trigger", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        timestamp: new Date().toISOString(),
+                        ...config
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`API error: ${response.status}`);
+                }
+
+                const incident = await response.json();
+                displayIncident(incident);
+            } catch (error) {
+                console.error("Error triggering scenario:", error);
+                alert("Failed to trigger scenario. Check browser console.");
+            } finally {
+                loadingIndicator.classList.add("hidden");
+            }
+        }
+
+        function displayIncident(incident) {
+            const incidentsList = document.getElementById("incidents-list");
+
+            if (incidentsList.querySelector(".empty-state")) {
+                incidentsList.innerHTML = "";
+            }
+
+            const severityColor = severityColors[incident.severity] || "#757575";
+            const rcaHtml = incident.root_cause ?
+                `<strong>${incident.root_cause.hypothesis}</strong> (${(incident.root_cause.confidence * 100).toFixed(0)}% confidence)` :
+                "Analysis pending";
+
+            const incidentCard = document.createElement("div");
+            incidentCard.className = "incident-card";
+            incidentCard.style.borderLeftColor = severityColor;
+            incidentCard.innerHTML = `
+                <div class="incident-header">
+                    <div class="incident-title">
+                        <h3>${incident.service}</h3>
+                        <span class="severity-badge" style="background-color: ${severityColor};">
+                            ${incident.severity.toUpperCase()}
+                        </span>
+                    </div>
+                    <p class="incident-description">${incident.alert_description}</p>
+                </div>
+                <div class="incident-details">
+                    <div class="detail-item">
+                        <strong>Root Cause:</strong> ${rcaHtml}
+                    </div>
+                    <div class="detail-item">
+                        <strong>Affected Users:</strong> ${incident.affected_users.toLocaleString()}
+                    </div>
+                    <div class="detail-item">
+                        <strong>Revenue Impact:</strong> $${incident.estimated_revenue_impact_per_minute.toFixed(2)}/min
+                    </div>
+                    <div class="detail-item">
+                        <strong>Log Anomalies:</strong> ${incident.log_anomalies.length} found
+                    </div>
+                    <div class="detail-item">
+                        <strong>Metric Anomalies:</strong> ${incident.metric_anomalies.length} found
+                    </div>
+                </div>
+                <div class="incident-footer">
+                    <button class="btn btn-secondary" onclick="viewDetails('${incident.incident_id}')">
+                        View Full Details
+                    </button>
+                </div>
+            `;
+
+            incidentsList.insertBefore(incidentCard, incidentsList.firstChild);
+        }
+
+        function viewDetails(incidentId) {
+            window.open(`/incident/${incidentId}?id=${incidentId}`, "_blank");
+        }
+
+        window.addEventListener("load", () => {
+            const emptyState = document.querySelector(".empty-state");
+            if (emptyState) {
+                emptyState.style.display = "block";
+            }
+        });
+    </script>
+</body>
+</html>

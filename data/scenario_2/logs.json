@@ -1,0 +1,62 @@
+[
+  {
+    "timestamp": "2026-07-07T15:00:00Z",
+    "level": "INFO",
+    "service": "order-processor",
+    "message": "Service started successfully"
+  },
+  {
+    "timestamp": "2026-07-07T15:10:32Z",
+    "level": "WARNING",
+    "service": "order-processor",
+    "message": "GC pause warning: pause time 250ms, memory used 650MB"
+  },
+  {
+    "timestamp": "2026-07-07T15:20:45Z",
+    "level": "WARNING",
+    "service": "order-processor",
+    "message": "GC pause warning: pause time 380ms, memory used 950MB"
+  },
+  {
+    "timestamp": "2026-07-07T15:30:15Z",
+    "level": "WARNING",
+    "service": "order-processor",
+    "message": "GC pause warning: pause time 520ms, memory used 1350MB"
+  },
+  {
+    "timestamp": "2026-07-07T15:40:22Z",
+    "level": "WARNING",
+    "service": "order-processor",
+    "message": "GC pause warning: pause time 680ms, memory used 1650MB"
+  },
+  {
+    "timestamp": "2026-07-07T15:50:10Z",
+    "level": "WARNING",
+    "service": "order-processor",
+    "message": "GC pause warning: pause time 850ms, memory used 1850MB"
+  },
+  {
+    "timestamp": "2026-07-07T16:00:33Z",
+    "level": "ERROR",
+    "service": "order-processor",
+    "message": "Memory pressure increasing: GC frequency elevated"
+  },
+  {
+    "timestamp": "2026-07-07T16:10:45Z",
+    "level": "WARNING",
+    "service": "order-processor",
+    "message": "GC pause warning: pause time 1200ms, memory used 1950MB"
+  },
+  {
+    "timestamp": "2026-07-07T16:20:12Z",
+    "level": "ERROR",
+    "service": "order-processor",
+    "message": "Request processing delayed due to garbage collection"
+  },
+  {
+    "timestamp": "2026-07-07T16:30:50Z",
+    "level": "CRITICAL",
+    "service": "order-processor",
+    "message": "Critical memory threshold reached: 2000MB (95% heap)"
+  }
+]

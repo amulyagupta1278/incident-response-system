@@ -1,0 +1,50 @@
+[
+  {
+    "timestamp": "2026-07-07T14:30:00Z",
+    "metric_name": "cpu_percent",
+    "value": 23,
+    "window": "baseline"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:15Z",
+    "metric_name": "cpu_percent",
+    "value": 78,
+    "window": "incident"
+  },
+  {
+    "timestamp": "2026-07-07T14:30:00Z",
+    "metric_name": "memory_mb",
+    "value": 450,
+    "window": "baseline"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:15Z",
+    "metric_name": "memory_mb",
+    "value": 520,
+    "window": "incident"
+  },
+  {
+    "timestamp": "2026-07-07T14:30:00Z",
+    "metric_name": "latency_ms",
+    "value": 50,
+    "window": "baseline"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:15Z",
+    "metric_name": "latency_ms",
+    "value": 450,
+    "window": "incident"
+  },
+  {
+    "timestamp": "2026-07-07T14:30:00Z",
+    "metric_name": "error_rate",
+    "value": 0.001,
+    "window": "baseline"
+  },
+  {
+    "timestamp": "2026-07-07T14:32:15Z",
+    "metric_name": "error_rate",
+    "value": 0.68,
+    "window": "incident"
+  }
+]

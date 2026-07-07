@@ -1,0 +1,68 @@
+[
+  {
+    "timestamp": "2026-07-07T17:05:00Z",
+    "level": "INFO",
+    "service": "checkout-gateway",
+    "message": "Processing checkout request for order ID xyz789"
+  },
+  {
+    "timestamp": "2026-07-07T17:05:01Z",
+    "level": "ERROR",
+    "service": "checkout-gateway",
+    "error_type": "timeout",
+    "message": "Timeout calling downstream payment-api service"
+  },
+  {
+    "timestamp": "2026-07-07T17:05:02Z",
+    "level": "ERROR",
+    "service": "checkout-gateway",
+    "error_type": "timeout",
+    "message": "Timeout calling downstream payment-api service"
+  },
+  {
+    "timestamp": "2026-07-07T17:05:03Z",
+    "level": "ERROR",
+    "service": "checkout-gateway",
+    "error_type": "timeout",
+    "message": "Timeout calling downstream payment-api service"
+  },
+  {
+    "timestamp": "2026-07-07T17:05:04Z",
+    "level": "ERROR",
+    "service": "checkout-gateway",
+    "message": "Failed to process payment: payment-api service degraded"
+  },
+  {
+    "timestamp": "2026-07-07T17:05:05Z",
+    "level": "ERROR",
+    "service": "checkout-gateway",
+    "error_type": "timeout",
+    "message": "Timeout calling downstream payment-api service"
+  },
+  {
+    "timestamp": "2026-07-07T17:05:06Z",
+    "level": "ERROR",
+    "service": "checkout-gateway",
+    "error_type": "timeout",
+    "message": "Timeout calling downstream payment-api service"
+  },
+  {
+    "timestamp": "2026-07-07T17:05:07Z",
+    "level": "CRITICAL",
+    "service": "checkout-gateway",
+    "message": "Cascading failure detected: payment-api service unavailable"
+  },
+  {
+    "timestamp": "2026-07-07T17:05:08Z",
+    "level": "ERROR",
+    "service": "checkout-gateway",
+    "error_type": "timeout",
+    "message": "Timeout calling downstream payment-api service"
+  },
+  {
+    "timestamp": "2026-07-07T17:05:09Z",
+    "level": "ERROR",
+    "service": "checkout-gateway",
+    "message": "Checkout processing halted due to payment service failure"
+  }
+]

@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Incident Details - AIOC</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>Incident Details</h1>
+            <a href="/" class="back-link">← Back to Dashboard</a>
+        </header>
+
+        <div id="incident-content" class="incident-content">
+            <p class="loading">Loading incident details...</p>
+        </div>
+    </div>
+
+    <script>
+        const severityColors = {
+            critical: "#d32f2f",
+            high: "#f57c00",
+            medium: "#fbc02d",
+            low: "#388e3c"
+        };
+
+        async function loadIncidentDetails() {
+            const params = new URLSearchParams(window.location.search);
+            const incidentId = params.get("id");
+
+            if (!incidentId) {
+                document.getElementById("incident-content").innerHTML =
+                    "<p class='error'>No incident ID provided.</p>";
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/incidents/${incidentId}`);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch incident: ${response.status}`);
+                }
+
+                const incident = await response.json();
+                displayIncidentDetails(incident);
+            } catch (error) {
+                console.error("Error loading incident:", error);
+                document.getElementById("incident-content").innerHTML =
+                    `<p class='error'>Failed to load incident: ${error.message}</p>`;
+            }
+        }
+
+        function displayIncidentDetails(incident) {
+            const severityColor = severityColors[incident.severity] || "#757575";
+
+            const rcaSection = incident.root_cause ? `
+                <section class="collapsible-section">
+                    <h3 class="section-title" onclick="toggleSection(this)">
+                        ▼ Root Cause Analysis
+                    </h3>
+                    <div class="section-content">
+                        <div class="rca-hypothesis">
+                            <strong>Hypothesis:</strong> ${incident.root_cause.hypothesis}
+                        </div>
+                        <div class="confidence-meter">
+                            <strong>Confidence:</strong>
+                            <div class="confidence-bar">
+                                <div class="confidence-fill" style="width: ${incident.root_cause.confidence * 100}%;"></div>
+                            </div>
+                            <span>${(incident.root_cause.confidence * 100).toFixed(0)}%</span>
+                        </div>
+                        <div class="evidence-list">
+                            <strong>Supporting Evidence:</strong>
+                            <ul>
+                                ${incident.root_cause.supporting_evidence.map(e => `<li>${e}</li>`).join("")}
+                            </ul>
+                        </div>
+                    </div>
+                </section>
+            ` : "";
+
+            const logAnomaliesSection = incident.log_anomalies.length > 0 ? `
+                <section class="collapsible-section">
+                    <h3 class="section-title" onclick="toggleSection(this)">
+                        ▼ Log Anomalies (${incident.log_anomalies.length})
+                    </h3>
+                    <div class="section-content">
+                        ${incident.log_anomalies.map(anomaly => `
+                            <div class="anomaly-item">
+                                <div class="anomaly-header">
+                                    <strong>${anomaly.type}</strong>
+                                    <span class="count-badge">${anomaly.count}</span>
+                                </div>
+                                <p class="anomaly-detail">Spike Factor: ${anomaly.spike_factor}x baseline</p>
+                                <p class="anomaly-detail">Severity: ${anomaly.severity}</p>
+                                ${anomaly.evidence && anomaly.evidence.length > 0 ? `
+                                    <details class="evidence-details">
+                                        <summary>Evidence (${anomaly.evidence.length})</summary>
+                                        <ul>
+                                            ${anomaly.evidence.map(e => `<li>${e}</li>`).join("")}
+                                        </ul>
+                                    </details>
+                                ` : ""}
+                            </div>
+                        `).join("")}
+                    </div>
+                </section>
+            ` : "";
+
+            const metricAnomaliesSection = incident.metric_anomalies.length > 0 ? `
+                <section class="collapsible-section">
+                    <h3 class="section-title" onclick="toggleSection(this)">
+                        ▼ Metric Anomalies (${incident.metric_anomalies.length})
+                    </h3>
+                    <div class="section-content">
+                        ${incident.metric_anomalies.map(metric => `
+                            <div class="anomaly-item">
+                                <div class="anomaly-header">
+                                    <strong>${metric.metric_name}</strong>
+                                    <span class="count-badge">${metric.percent_change.toFixed(1)}%</span>
+                                </div>
+                                <p class="anomaly-detail">Baseline: ${metric.baseline} → Current: ${metric.current}</p>
+                                <p class="anomaly-detail">Severity: ${metric.severity}</p>
+                            </div>
+                        `).join("")}
+                    </div>
+                </section>
+            ` : "";
+
+            const businessImpactSection = `
+                <section class="collapsible-section">
+                    <h3 class="section-title" onclick="toggleSection(this)">
+                        ▼ Business Impact
+                    </h3>
+                    <div class="section-content">
+                        <div class="impact-metric">
+                            <strong>Affected Users:</strong>
+                            <span class="metric-value">${incident.affected_users.toLocaleString()}</span>
+                        </div>
+                        <div class="impact-metric">
+                            <strong>Revenue Impact:</strong>
+                            <span class="metric-value">$${incident.estimated_revenue_impact_per_minute.toFixed(2)}/minute</span>
+                        </div>
+                    </div>
+                </section>
+            `;
+
+            const recommendationsSection = incident.recovery_recommendations.length > 0 ? `
+                <section class="collapsible-section">
+                    <h3 class="section-title" onclick="toggleSection(this)">
+                        ▼ Recovery Recommendations
+                    </h3>
+                    <div class="section-content">
+                        <ol>
+                            ${incident.recovery_recommendations.map(rec => `<li>${rec}</li>`).join("")}
+                        </ol>
+                    </div>
+                </section>
+            ` : "";
+
+            const auditTrailSection = incident.agent_invocations.length > 0 ? `
+                <section class="collapsible-section">
+                    <h3 class="section-title" onclick="toggleSection(this)">
+                        ▼ Agent Invocation Audit Trail
+                    </h3>
+                    <div class="section-content">
+                        <table class="audit-table">
+                            <thead>
+                                <tr>
+                                    <th>Agent</th>
+                                    <th>Action</th>
+                                    <th>Timestamp</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${incident.agent_invocations.map(inv => `
+                                    <tr>
+                                        <td>${inv.agent}</td>
+                                        <td>${inv.action}</td>
+                                        <td>${new Date(inv.timestamp).toLocaleTimeString()}</td>
+                                    </tr>
+                                `).join("")}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            ` : "";
+
+            const summariesSection = `
+                <section class="summaries-section">
+                    <div class="summary-pane">
+                        <h3>Engineering Summary</h3>
+                        <pre class="summary-text">${escapeHtml(incident.engineering_summary)}</pre>
+                    </div>
+                    <div class="summary-pane">
+                        <h3>Executive Summary</h3>
+                        <pre class="summary-text">${escapeHtml(incident.executive_summary)}</pre>
+                    </div>
+                </section>
+            `;
+
+            const alertMetadata = `
+                <section class="metadata-section">
+                    <h2>Alert Metadata</h2>
+                    <div class="metadata-grid">
+                        <div class="metadata-item">
+                            <strong>Service:</strong> <code>${incident.service}</code>
+                        </div>
+                        <div class="metadata-item">
+                            <strong>Incident ID:</strong> <code>${incident.incident_id}</code>
+                        </div>
+                        <div class="metadata-item">
+                            <strong>Timestamp:</strong> <code>${new Date(incident.timestamp).toLocaleString()}</code>
+                        </div>
+                        <div class="metadata-item">
+                            <strong>Severity:</strong>
+                            <span class="severity-badge" style="background-color: ${severityColor};">
+                                ${incident.severity.toUpperCase()}
+                            </span>
+                        </div>
+                        <div class="metadata-item" style="grid-column: 1 / -1;">
+                            <strong>Description:</strong> ${incident.alert_description}
+                        </div>
+                    </div>
+                </section>
+            `;
+
+            document.getElementById("incident-content").innerHTML = `
+                ${alertMetadata}
+                ${summariesSection}
+                ${rcaSection}
+                ${logAnomaliesSection}
+                ${metricAnomaliesSection}
+                ${businessImpactSection}
+                ${recommendationsSection}
+                ${auditTrailSection}
+            `;
+        }
+
+        function toggleSection(titleElement) {
+            const section = titleElement.parentElement;
+            const content = section.querySelector(".section-content");
+            const isOpen = content.style.display !== "none";
+
+            content.style.display = isOpen ? "none" : "block";
+            titleElement.textContent = (isOpen ? "▶" : "▼") + titleElement.textContent.substring(1);
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement("div");
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        window.addEventListener("load", loadIncidentDetails);
+    </script>
+</body>
+</html>

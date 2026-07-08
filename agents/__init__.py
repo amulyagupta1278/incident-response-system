@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
-from datetime import datetime
+from typing import List, Dict, Any, Set
 
 
 @dataclass
@@ -22,3 +21,9 @@ class IncidentState:
     executive_summary: str = ""
     recovery_recommendations: List[str] = field(default_factory=list)
     agent_invocations: List[Dict[str, Any]] = field(default_factory=list)
+    completed_steps: Set[str] = field(default_factory=set)
+    analysis_iterations: int = 0
+    rca_confidence: float = 0.0
+    max_iterations: int = 5
+    current_status: str = "initial"
+    next_action: str = ""

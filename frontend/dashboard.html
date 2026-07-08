@@ -4,41 +4,44 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Operations Command Center</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
     <div class="container">
         <header class="header">
-            <h1>AI Operations Command Center</h1>
-            <p>Autonomous Multi-Agent Incident Response System</p>
+            <div class="header-row">
+                <div>
+                    <h1>AI Operations Command Center</h1>
+                    <p>Autonomous Multi-Agent Incident Response System</p>
+                </div>
+                <div id="llm-badge" class="llm-badge" title="Reasoning engine powering the agents">
+                    <span class="llm-dot"></span>
+                    <span id="llm-badge-text">connecting&hellip;</span>
+                </div>
+            </div>
         </header>
 
         <section class="test-scenarios">
-            <h2>Test Scenarios</h2>
+            <h2>Trigger an Incident</h2>
             <div class="scenario-buttons">
-                <button class="btn btn-primary" onclick="triggerScenario(1)">
+                <button class="btn btn-primary" id="btn-scenario-1" onclick="triggerScenario(1)">
                     Scenario 1: DB Pool Exhaustion
                 </button>
-                <button class="btn btn-primary" onclick="triggerScenario(2)">
+                <button class="btn btn-primary" id="btn-scenario-2" onclick="triggerScenario(2)">
                     Scenario 2: Memory Leak
                 </button>
-                <button class="btn btn-primary" onclick="triggerScenario(3)">
+                <button class="btn btn-primary" id="btn-scenario-3" onclick="triggerScenario(3)">
                     Scenario 3: Cascading Failure
                 </button>
             </div>
         </section>
 
         <section class="incidents-section">
-            <h2>Active Incidents</h2>
+            <h2>Incidents</h2>
             <div id="incidents-list" class="incidents-list">
-                <p class="empty-state">No incidents yet. Click a scenario above to trigger one.</p>
+                <p class="empty-state">No incidents yet. Trigger a scenario above and watch the agents investigate live.</p>
             </div>
         </section>
-
-        <div id="loading-indicator" class="loading-indicator hidden">
-            <div class="spinner"></div>
-            <p>Analyzing incident...</p>
-        </div>
     </div>
 
     <script>
@@ -67,87 +70,185 @@
             low: "#388e3c"
         };
 
+        const agentLabels = {
+            router_agent: "Router",
+            incident_commander: "Incident Commander",
+            log_analysis: "Log Analysis",
+            metrics_analysis: "Metrics Analysis",
+            rca_agent: "RCA Agent",
+            rca_analysis: "RCA Agent",
+            request_more_data_agent: "Request More Data",
+            business_impact: "Business Impact",
+            executive_summary: "Executive Summary"
+        };
+
+        const pollers = {};
+
+        function escapeHtml(text) {
+            const div = document.createElement("div");
+            div.textContent = text == null ? "" : String(text);
+            return div.innerHTML;
+        }
+
+        async function loadConfig() {
+            try {
+                const res = await fetch("/api/config");
+                const cfg = await res.json();
+                const badge = document.getElementById("llm-badge");
+                const text = document.getElementById("llm-badge-text");
+                if (cfg.llm_provider === "heuristic") {
+                    badge.classList.add("llm-badge-offline");
+                    text.textContent = "Heuristic mode (no API key)";
+                } else {
+                    badge.classList.add("llm-badge-online");
+                    text.textContent = `${cfg.llm_provider} · ${cfg.llm_model}`;
+                }
+            } catch (e) {
+                document.getElementById("llm-badge-text").textContent = "offline";
+            }
+        }
+
+        async function loadExistingIncidents() {
+            try {
+                const res = await fetch("/api/incidents");
+                const incidents = await res.json();
+                for (const incident of incidents.slice().reverse()) {
+                    upsertIncidentCard(incident);
+                    if (incident.current_status !== "complete" && incident.current_status !== "failed") {
+                        startPolling(incident.incident_id);
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to load incidents:", e);
+            }
+        }
+
         async function triggerScenario(scenarioNumber) {
             const config = scenarioConfigs[scenarioNumber];
-            const loadingIndicator = document.getElementById("loading-indicator");
-            loadingIndicator.classList.remove("hidden");
+            const button = document.getElementById(`btn-scenario-${scenarioNumber}`);
+            button.disabled = true;
+            setTimeout(() => { button.disabled = false; }, 2000);
 
             try {
                 const response = await fetch("/api/incidents/trigger", {
                     method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
+                    headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         timestamp: new Date().toISOString(),
                         ...config
                     })
                 });
-
-                if (!response.ok) {
-                    throw new Error(`API error: ${response.status}`);
-                }
+                if (!response.ok) throw new Error(`API error: ${response.status}`);
 
                 const incident = await response.json();
-                displayIncident(incident);
+                upsertIncidentCard(incident);
+                startPolling(incident.incident_id);
             } catch (error) {
                 console.error("Error triggering scenario:", error);
                 alert("Failed to trigger scenario. Check browser console.");
-            } finally {
-                loadingIndicator.classList.add("hidden");
             }
         }
 
-        function displayIncident(incident) {
-            const incidentsList = document.getElementById("incidents-list");
+        function startPolling(incidentId) {
+            if (pollers[incidentId]) return;
+            pollers[incidentId] = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/incidents/${incidentId}`);
+                    if (!res.ok) throw new Error(`status ${res.status}`);
+                    const incident = await res.json();
+                    upsertIncidentCard(incident);
+                    if (incident.current_status === "complete" || incident.current_status === "failed") {
+                        clearInterval(pollers[incidentId]);
+                        delete pollers[incidentId];
+                    }
+                } catch (e) {
+                    clearInterval(pollers[incidentId]);
+                    delete pollers[incidentId];
+                }
+            }, 700);
+        }
 
-            if (incidentsList.querySelector(".empty-state")) {
-                incidentsList.innerHTML = "";
+        function statusChip(status) {
+            if (status === "complete") return '<span class="status-chip status-complete">COMPLETE</span>';
+            if (status === "failed") return '<span class="status-chip status-failed">FAILED</span>';
+            return `<span class="status-chip status-running"><span class="pulse"></span>${escapeHtml(status.replace(/_/g, " ").toUpperCase())}</span>`;
+        }
+
+        function timelineHtml(incident) {
+            const invocations = incident.agent_invocations || [];
+            if (invocations.length === 0) {
+                return '<div class="timeline-item"><span class="pulse"></span> Dispatching agents&hellip;</div>';
+            }
+            const items = invocations.slice(-6).map(inv => {
+                const label = agentLabels[inv.agent] || inv.agent;
+                const detail = inv.reasoning || inv.hypothesis || (inv.action || "").replace("route:", "next → ");
+                const src = inv.source && inv.source.startsWith("llm") ? '<span class="mini-badge">LLM</span>' : "";
+                return `<div class="timeline-item">
+                            <span class="timeline-agent">${escapeHtml(label)}</span> ${src}
+                            <span class="timeline-detail">${escapeHtml(detail)}</span>
+                        </div>`;
+            });
+            return items.join("");
+        }
+
+        function upsertIncidentCard(incident) {
+            const incidentsList = document.getElementById("incidents-list");
+            const emptyState = incidentsList.querySelector(".empty-state");
+            if (emptyState) incidentsList.innerHTML = "";
+
+            let card = document.getElementById(`incident-${incident.incident_id}`);
+            if (!card) {
+                card = document.createElement("div");
+                card.id = `incident-${incident.incident_id}`;
+                card.className = "incident-card";
+                incidentsList.insertBefore(card, incidentsList.firstChild);
             }
 
             const severityColor = severityColors[incident.severity] || "#757575";
-            const rcaHtml = incident.root_cause ?
-                `<strong>${incident.root_cause.hypothesis}</strong> (${(incident.root_cause.confidence * 100).toFixed(0)}% confidence)` :
-                "Analysis pending";
+            card.style.borderLeftColor = severityColor;
 
-            const incidentCard = document.createElement("div");
-            incidentCard.className = "incident-card";
-            incidentCard.style.borderLeftColor = severityColor;
-            incidentCard.innerHTML = `
+            const isDone = incident.current_status === "complete";
+            const confidence = incident.rca_confidence || 0;
+            const rcaHtml = incident.root_cause
+                ? `<strong>${escapeHtml(incident.root_cause.hypothesis)}</strong> (${(confidence * 100).toFixed(0)}% confidence)`
+                : "Agents investigating…";
+
+            card.innerHTML = `
                 <div class="incident-header">
                     <div class="incident-title">
-                        <h3>${incident.service}</h3>
+                        <h3>${escapeHtml(incident.service)}</h3>
                         <span class="severity-badge" style="background-color: ${severityColor};">
-                            ${incident.severity.toUpperCase()}
+                            ${escapeHtml((incident.severity || "unknown").toUpperCase())}
                         </span>
+                        ${statusChip(incident.current_status)}
                     </div>
-                    <p class="incident-description">${incident.alert_description}</p>
+                    <p class="incident-description">${escapeHtml(incident.alert_description)}</p>
                 </div>
                 <div class="incident-details">
-                    <div class="detail-item">
-                        <strong>Root Cause:</strong> ${rcaHtml}
+                    <div class="detail-item"><strong>Root Cause:</strong> ${rcaHtml}</div>
+                    <div class="confidence-meter">
+                        <strong>Confidence:</strong>
+                        <div class="confidence-bar"><div class="confidence-fill" style="width: ${confidence * 100}%;"></div></div>
+                        <span>${(confidence * 100).toFixed(0)}%</span>
                     </div>
-                    <div class="detail-item">
-                        <strong>Affected Users:</strong> ${incident.affected_users.toLocaleString()}
-                    </div>
-                    <div class="detail-item">
-                        <strong>Revenue Impact:</strong> $${incident.estimated_revenue_impact_per_minute.toFixed(2)}/min
-                    </div>
-                    <div class="detail-item">
-                        <strong>Log Anomalies:</strong> ${incident.log_anomalies.length} found
-                    </div>
-                    <div class="detail-item">
-                        <strong>Metric Anomalies:</strong> ${incident.metric_anomalies.length} found
+                    <div class="detail-grid">
+                        <div class="detail-item"><strong>Iterations:</strong> ${incident.analysis_iterations || 0}</div>
+                        <div class="detail-item"><strong>Log Anomalies:</strong> ${(incident.log_anomalies || []).length}</div>
+                        <div class="detail-item"><strong>Metric Anomalies:</strong> ${(incident.metric_anomalies || []).length}</div>
+                        <div class="detail-item"><strong>Affected Users:</strong> ${(incident.affected_users || 0).toLocaleString()}</div>
+                        <div class="detail-item"><strong>Revenue Impact:</strong> $${(incident.estimated_revenue_impact_per_minute || 0).toFixed(2)}/min</div>
                     </div>
                 </div>
+                <div class="agent-timeline">
+                    <h4>Agent Activity ${isDone ? `(${(incident.agent_invocations || []).length} invocations)` : ""}</h4>
+                    ${timelineHtml(incident)}
+                </div>
                 <div class="incident-footer">
-                    <button class="btn btn-secondary" onclick="viewDetails('${incident.incident_id}')">
-                        View Full Details
+                    <button class="btn btn-secondary" onclick="viewDetails('${incident.incident_id}')" ${isDone ? "" : "disabled"}>
+                        ${isDone ? "View Full Details" : "Analysis in progress…"}
                     </button>
                 </div>
             `;
-
-            incidentsList.insertBefore(incidentCard, incidentsList.firstChild);
         }
 
         function viewDetails(incidentId) {
@@ -155,10 +256,8 @@
         }
 
         window.addEventListener("load", () => {
-            const emptyState = document.querySelector(".empty-state");
-            if (emptyState) {
-                emptyState.style.display = "block";
-            }
+            loadConfig();
+            loadExistingIncidents();
         });
     </script>
 </body>

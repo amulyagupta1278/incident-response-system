@@ -17,7 +17,7 @@ The AI Operations Command Center is a multi-agent system that orchestrates auton
 5. **Business Impact** - Calculate affected users and revenue impact
 6. **Executive Summary** - Generate engineering and executive reports
 
-Powered by LangGraph orchestration and Claude API for intelligent synthesis.
+Powered by LangGraph orchestration with LLM reasoning from **OpenAI or Anthropic** (auto-detected from your API key). The router, RCA, and report-writing agents all reason with the LLM; every agent has a deterministic fallback so the system also runs fully offline in heuristic mode.
 
 ## Architecture
 
@@ -40,6 +40,7 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
+# paste your OPENAI_API_KEY (or ANTHROPIC_API_KEY) into .env
 
 pytest
 python app.py
@@ -128,16 +129,16 @@ All three scenarios pass with:
 ## Tech Stack
 
 - **Python 3.10+** - Core language
-- **LangGraph 0.0.33** - Agent orchestration
-- **FastAPI 0.104.1** - REST backend
-- **Claude 3.5 Sonnet** - AI synthesis (API key in .env)
-- **Pydantic 2.4.2** - Data validation
-- **pytest 7.4.3** - Testing
+- **LangGraph** - Agent orchestration
+- **FastAPI** - REST backend (analysis runs as a background task; the UI polls live progress)
+- **OpenAI (gpt-4o) or Anthropic (claude-opus-4-8)** - LLM reasoning, selected via `LLM_PROVIDER` / API keys in `.env`
+- **Pydantic** - Data validation
+- **pytest** - Testing
 - **Vanilla HTML/CSS/JavaScript** - Frontend (no build step)
 
 ## API Endpoints
 
-- `POST /api/incidents/trigger` - Trigger incident analysis
+- `POST /api/incidents/trigger` - Start incident analysis (returns immediately with `current_status: "investigating"`; agents run in the background)
   ```json
   {
     "timestamp": "2026-07-07T14:32:15Z",
@@ -147,7 +148,10 @@ All three scenarios pass with:
   }
   ```
 
-- `GET /api/incidents/{incident_id}` - Retrieve completed analysis
+- `GET /api/incidents` - List all incidents (newest first)
+- `GET /api/incidents/{incident_id}` - Poll live analysis state / retrieve completed analysis
+- `GET /api/config` - Active LLM provider and model (`heuristic` when no key is set)
+- `GET /api/graph` - Mermaid rendering of the agent graph
 - `GET /api/health` - Health check
 - `GET /` - Dashboard HTML
 - `GET /incident/{incident_id}` - Incident detail HTML

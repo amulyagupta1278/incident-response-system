@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict
 
 from langgraph.graph import END, StateGraph
@@ -6,21 +7,32 @@ from agents import IncidentState
 from agents.business_impact import business_impact
 from agents.executive_summary import executive_summary
 from agents.incident_commander import incident_commander
+from agents.llm import complete_json, get_model, llm_available
 from agents.log_analysis import log_analysis
 from agents.metrics_analysis import metrics_analysis
-from agents.rca_agent import rca_analysis_with_claude
+from agents.rca_agent import rca_analysis_with_llm
 from agents.request_more_data_agent import request_more_data
-from agents.router_agent import route_next_action, should_request_more_data
+from agents.router_agent import route_next_action_agentic, should_request_more_data
 
 _compiled_graph: Any = None
+
+SUMMARY_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "executive_summary": {"type": "string"},
+        "recovery_recommendations": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["executive_summary", "recovery_recommendations"],
+    "additionalProperties": False,
+}
 
 
 def _as_updates(state: IncidentState) -> Dict[str, Any]:
     return dict(vars(state))
 
 
-def _route_node(state: IncidentState) -> Dict[str, Any]:
-    state.next_action = route_next_action(state)
+async def _route_node(state: IncidentState) -> Dict[str, Any]:
+    state.next_action = await route_next_action_agentic(state)
     return _as_updates(state)
 
 
@@ -50,7 +62,7 @@ def _analyze_metrics_node(state: IncidentState) -> Dict[str, Any]:
 
 
 async def _run_rca_node(state: IncidentState) -> Dict[str, Any]:
-    state = await rca_analysis_with_claude(state)
+    state = await rca_analysis_with_llm(state)
     state.current_status = "rca_completed"
     return _as_updates(state)
 
@@ -67,11 +79,60 @@ def _business_impact_node(state: IncidentState) -> Dict[str, Any]:
     return _as_updates(state)
 
 
-def _generate_summary_node(state: IncidentState) -> Dict[str, Any]:
+async def _generate_summary_node(state: IncidentState) -> Dict[str, Any]:
     state = executive_summary(state)
+    state = await _enhance_summary_with_llm(state)
     state.completed_steps.add("summary")
     state.current_status = "complete"
     return _as_updates(state)
+
+
+async def _enhance_summary_with_llm(state: IncidentState) -> IncidentState:
+    """Rewrite the executive summary and recovery plan with the configured
+    LLM, grounded in the analysis. Deterministic summaries remain if no LLM
+    is configured or the call fails."""
+    if not llm_available():
+        return state
+
+    prompt: str = (
+        "Write an incident report for company leadership and a recovery plan "
+        "for engineers, based strictly on this completed analysis.\n\n"
+        f"Service: {state.service}\nAlert: {state.alert_description}\n"
+        f"Severity: {state.severity}\n"
+        f"Root cause: {state.root_cause}\n"
+        f"Affected users: {state.affected_users:,}\n"
+        f"Revenue impact: ${state.estimated_revenue_impact_per_minute:.2f}/minute\n"
+        f"Log anomalies: {state.log_anomalies}\n"
+        f"Metric anomalies: {state.metric_anomalies}\n\n"
+        "The executive_summary must be plain text (no markdown), at most 150 "
+        "words, non-technical, and lead with impact. recovery_recommendations "
+        "must be 4-6 specific, actionable steps ordered by priority."
+    )
+    try:
+        result: Dict[str, Any] = await complete_json(
+            system="You are an incident communications specialist. Respond with JSON.",
+            prompt=prompt,
+            schema=SUMMARY_SCHEMA,
+            schema_name="incident_report",
+        )
+        if result.get("executive_summary"):
+            state.executive_summary = result["executive_summary"]
+        if result.get("recovery_recommendations"):
+            state.recovery_recommendations = [
+                str(r) for r in result["recovery_recommendations"]
+            ]
+        state.agent_invocations.append(
+            {
+                "agent": "executive_summary",
+                "timestamp": datetime.now().isoformat(),
+                "action": "llm_enhance_summaries",
+                "source": f"llm:{get_model()}",
+                "iteration": state.analysis_iterations,
+            }
+        )
+    except Exception as exc:
+        print(f"[summary] LLM enhancement failed, keeping deterministic summaries: {exc}")
+    return state
 
 
 def create_incident_analysis_graph() -> Any:
@@ -134,7 +195,9 @@ def get_compiled_graph() -> Any:
 
 async def run_incident_analysis(state: IncidentState) -> IncidentState:
     graph: Any = get_compiled_graph()
-    result: Any = await graph.ainvoke(dict(vars(state)))
+    result: Any = await graph.ainvoke(
+        dict(vars(state)), config={"recursion_limit": 60}
+    )
     if isinstance(result, IncidentState):
         return result
     return IncidentState(**result)

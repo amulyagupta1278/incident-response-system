@@ -5,8 +5,6 @@ from langchain_core.tools import tool
 
 from mock_data import load_deployments, load_logs, load_metrics, load_service_config
 
-RCA_MODEL: str = "claude-opus-4-8"
-
 RCA_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -44,13 +42,12 @@ def get_service_config(service: str) -> Dict[str, Any]:
 
 
 @tool
-async def call_claude_for_rca(
+async def call_llm_for_rca(
     logs_str: str, metrics_str: str, deployments_str: str
 ) -> Dict[str, Any]:
-    """Ask Claude to reason over incident evidence and return a root cause hypothesis."""
-    from anthropic import AsyncAnthropic
-
-    client: AsyncAnthropic = AsyncAnthropic()
+    """Ask the configured LLM (OpenAI or Anthropic) to reason over incident
+    evidence and return a root cause hypothesis."""
+    from agents.llm import complete_json
 
     prompt: str = (
         "You are a senior site reliability engineer performing root cause analysis "
@@ -62,16 +59,13 @@ async def call_claude_for_rca(
         "a calibrated confidence between 0 and 1, and three to five pieces of "
         "supporting evidence grounded in the data above."
     )
-
-    message: Any = await client.messages.create(
-        model=RCA_MODEL,
-        max_tokens=8000,
-        thinking={"type": "adaptive"},
-        output_config={"format": {"type": "json_schema", "schema": RCA_SCHEMA}},
-        messages=[{"role": "user", "content": prompt}],
+    return await complete_json(
+        system="You are an expert SRE. Ground every claim in the provided evidence.",
+        prompt=prompt,
+        schema=RCA_SCHEMA,
+        schema_name="root_cause_analysis",
     )
 
-    response_text: str = next(
-        block.text for block in message.content if block.type == "text"
-    )
-    return json.loads(response_text)
+
+# Backwards-compatible alias (previous name)
+call_claude_for_rca = call_llm_for_rca

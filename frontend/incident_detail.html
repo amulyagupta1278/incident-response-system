@@ -4,13 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Incident Details - AIOC</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
     <div class="container">
         <header class="header">
             <h1>Incident Details</h1>
-            <a href="/" class="back-link">← Back to Dashboard</a>
+            <a href="/" class="back-link">&larr; Back to Dashboard</a>
         </header>
 
         <div id="incident-content" class="incident-content">
@@ -26,10 +26,38 @@
             low: "#388e3c"
         };
 
-        async function loadIncidentDetails() {
-            const params = new URLSearchParams(window.location.search);
-            const incidentId = params.get("id");
+        const agentLabels = {
+            router_agent: "Router",
+            incident_commander: "Incident Commander",
+            log_analysis: "Log Analysis",
+            metrics_analysis: "Metrics Analysis",
+            rca_agent: "RCA Agent",
+            rca_analysis: "RCA Agent",
+            request_more_data_agent: "Request More Data",
+            business_impact: "Business Impact",
+            executive_summary: "Executive Summary"
+        };
 
+        let poller = null;
+
+        function escapeHtml(text) {
+            const div = document.createElement("div");
+            div.textContent = text == null ? "" : String(text);
+            return div.innerHTML;
+        }
+
+        function getIncidentId() {
+            const params = new URLSearchParams(window.location.search);
+            let id = params.get("id");
+            if (!id) {
+                const parts = window.location.pathname.split("/");
+                id = parts[parts.length - 1];
+            }
+            return id;
+        }
+
+        async function loadIncidentDetails() {
+            const incidentId = getIncidentId();
             if (!incidentId) {
                 document.getElementById("incident-content").innerHTML =
                     "<p class='error'>No incident ID provided.</p>";
@@ -38,30 +66,40 @@
 
             try {
                 const response = await fetch(`/api/incidents/${incidentId}`);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch incident: ${response.status}`);
-                }
+                if (!response.ok) throw new Error(`Failed to fetch incident: ${response.status}`);
 
                 const incident = await response.json();
                 displayIncidentDetails(incident);
+
+                if (incident.current_status !== "complete" && incident.current_status !== "failed") {
+                    if (!poller) poller = setInterval(loadIncidentDetails, 1000);
+                } else if (poller) {
+                    clearInterval(poller);
+                    poller = null;
+                }
             } catch (error) {
                 console.error("Error loading incident:", error);
                 document.getElementById("incident-content").innerHTML =
-                    `<p class='error'>Failed to load incident: ${error.message}</p>`;
+                    `<p class='error'>Failed to load incident: ${escapeHtml(error.message)}</p>`;
             }
         }
 
         function displayIncidentDetails(incident) {
             const severityColor = severityColors[incident.severity] || "#757575";
 
+            const statusBanner = incident.current_status !== "complete" ? `
+                <div class="status-banner ${incident.current_status === "failed" ? "status-banner-failed" : ""}">
+                    ${incident.current_status === "failed"
+                        ? `Analysis failed: ${escapeHtml(incident.error || "unknown error")}`
+                        : `<span class="pulse"></span> Agents still investigating (${escapeHtml(incident.current_status.replace(/_/g, " "))}) — this page updates live`}
+                </div>` : "";
+
             const rcaSection = incident.root_cause ? `
                 <section class="collapsible-section">
-                    <h3 class="section-title" onclick="toggleSection(this)">
-                        ▼ Root Cause Analysis
-                    </h3>
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Root Cause Analysis</h3>
                     <div class="section-content">
                         <div class="rca-hypothesis">
-                            <strong>Hypothesis:</strong> ${incident.root_cause.hypothesis}
+                            <strong>Hypothesis:</strong> ${escapeHtml(incident.root_cause.hypothesis)}
                         </div>
                         <div class="confidence-meter">
                             <strong>Confidence:</strong>
@@ -73,33 +111,29 @@
                         <div class="evidence-list">
                             <strong>Supporting Evidence:</strong>
                             <ul>
-                                ${incident.root_cause.supporting_evidence.map(e => `<li>${e}</li>`).join("")}
+                                ${(incident.root_cause.supporting_evidence || []).map(e => `<li>${escapeHtml(e)}</li>`).join("")}
                             </ul>
                         </div>
                     </div>
                 </section>
             ` : "";
 
-            const logAnomaliesSection = incident.log_anomalies.length > 0 ? `
+            const logAnomaliesSection = (incident.log_anomalies || []).length > 0 ? `
                 <section class="collapsible-section">
-                    <h3 class="section-title" onclick="toggleSection(this)">
-                        ▼ Log Anomalies (${incident.log_anomalies.length})
-                    </h3>
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Log Anomalies (${incident.log_anomalies.length})</h3>
                     <div class="section-content">
                         ${incident.log_anomalies.map(anomaly => `
                             <div class="anomaly-item">
                                 <div class="anomaly-header">
-                                    <strong>${anomaly.type}</strong>
+                                    <strong>${escapeHtml(anomaly.type)}</strong>
                                     <span class="count-badge">${anomaly.count}</span>
                                 </div>
                                 <p class="anomaly-detail">Spike Factor: ${anomaly.spike_factor}x baseline</p>
-                                <p class="anomaly-detail">Severity: ${anomaly.severity}</p>
+                                <p class="anomaly-detail">Severity: ${escapeHtml(anomaly.severity)}</p>
                                 ${anomaly.evidence && anomaly.evidence.length > 0 ? `
                                     <details class="evidence-details">
                                         <summary>Evidence (${anomaly.evidence.length})</summary>
-                                        <ul>
-                                            ${anomaly.evidence.map(e => `<li>${e}</li>`).join("")}
-                                        </ul>
+                                        <ul>${anomaly.evidence.map(e => `<li>${escapeHtml(e)}</li>`).join("")}</ul>
                                     </details>
                                 ` : ""}
                             </div>
@@ -108,20 +142,31 @@
                 </section>
             ` : "";
 
-            const metricAnomaliesSection = incident.metric_anomalies.length > 0 ? `
+            const metricAnomaliesSection = (incident.metric_anomalies || []).length > 0 ? `
                 <section class="collapsible-section">
-                    <h3 class="section-title" onclick="toggleSection(this)">
-                        ▼ Metric Anomalies (${incident.metric_anomalies.length})
-                    </h3>
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Metric Anomalies (${incident.metric_anomalies.length})</h3>
                     <div class="section-content">
                         ${incident.metric_anomalies.map(metric => `
                             <div class="anomaly-item">
                                 <div class="anomaly-header">
-                                    <strong>${metric.metric_name}</strong>
+                                    <strong>${escapeHtml(metric.metric_name)}</strong>
                                     <span class="count-badge">${metric.percent_change.toFixed(1)}%</span>
                                 </div>
-                                <p class="anomaly-detail">Baseline: ${metric.baseline} → Current: ${metric.current}</p>
-                                <p class="anomaly-detail">Severity: ${metric.severity}</p>
+                                <p class="anomaly-detail">Baseline: ${metric.baseline} &rarr; Current: ${metric.current}</p>
+                                <p class="anomaly-detail">Severity: ${escapeHtml(metric.severity)}</p>
+                            </div>
+                        `).join("")}
+                    </div>
+                </section>
+            ` : "";
+
+            const deploymentsSection = (incident.deployment_changes || []).length > 0 ? `
+                <section class="collapsible-section">
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Recent Deployments (${incident.deployment_changes.length})</h3>
+                    <div class="section-content">
+                        ${incident.deployment_changes.map(dep => `
+                            <div class="anomaly-item">
+                                <pre class="deployment-json">${escapeHtml(JSON.stringify(dep, null, 2))}</pre>
                             </div>
                         `).join("")}
                     </div>
@@ -130,54 +175,52 @@
 
             const businessImpactSection = `
                 <section class="collapsible-section">
-                    <h3 class="section-title" onclick="toggleSection(this)">
-                        ▼ Business Impact
-                    </h3>
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Business Impact</h3>
                     <div class="section-content">
                         <div class="impact-metric">
                             <strong>Affected Users:</strong>
-                            <span class="metric-value">${incident.affected_users.toLocaleString()}</span>
+                            <span class="metric-value">${(incident.affected_users || 0).toLocaleString()}</span>
                         </div>
                         <div class="impact-metric">
                             <strong>Revenue Impact:</strong>
-                            <span class="metric-value">$${incident.estimated_revenue_impact_per_minute.toFixed(2)}/minute</span>
+                            <span class="metric-value">$${(incident.estimated_revenue_impact_per_minute || 0).toFixed(2)}/minute</span>
                         </div>
                     </div>
                 </section>
             `;
 
-            const recommendationsSection = incident.recovery_recommendations.length > 0 ? `
+            const recommendationsSection = (incident.recovery_recommendations || []).length > 0 ? `
                 <section class="collapsible-section">
-                    <h3 class="section-title" onclick="toggleSection(this)">
-                        ▼ Recovery Recommendations
-                    </h3>
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Recovery Recommendations</h3>
                     <div class="section-content">
-                        <ol>
-                            ${incident.recovery_recommendations.map(rec => `<li>${rec}</li>`).join("")}
-                        </ol>
+                        <ol>${incident.recovery_recommendations.map(rec => `<li>${escapeHtml(rec)}</li>`).join("")}</ol>
                     </div>
                 </section>
             ` : "";
 
-            const auditTrailSection = incident.agent_invocations.length > 0 ? `
+            const auditTrailSection = (incident.agent_invocations || []).length > 0 ? `
                 <section class="collapsible-section">
-                    <h3 class="section-title" onclick="toggleSection(this)">
-                        ▼ Agent Invocation Audit Trail
-                    </h3>
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Agent Reasoning &amp; Audit Trail (${incident.agent_invocations.length} invocations, ${incident.analysis_iterations} iterations)</h3>
                     <div class="section-content">
                         <table class="audit-table">
                             <thead>
                                 <tr>
+                                    <th>#</th>
                                     <th>Agent</th>
                                     <th>Action</th>
-                                    <th>Timestamp</th>
+                                    <th>Reasoning / Findings</th>
+                                    <th>Source</th>
+                                    <th>Time</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                ${incident.agent_invocations.map(inv => `
+                                ${incident.agent_invocations.map((inv, i) => `
                                     <tr>
-                                        <td>${inv.agent}</td>
-                                        <td>${inv.action}</td>
+                                        <td>${i + 1}</td>
+                                        <td><strong>${escapeHtml(agentLabels[inv.agent] || inv.agent)}</strong></td>
+                                        <td>${escapeHtml(inv.action)}</td>
+                                        <td class="audit-reasoning">${auditDetail(inv)}</td>
+                                        <td>${sourceBadge(inv.source)}</td>
                                         <td>${new Date(inv.timestamp).toLocaleTimeString()}</td>
                                     </tr>
                                 `).join("")}
@@ -204,53 +247,65 @@
                 <section class="metadata-section">
                     <h2>Alert Metadata</h2>
                     <div class="metadata-grid">
-                        <div class="metadata-item">
-                            <strong>Service:</strong> <code>${incident.service}</code>
-                        </div>
-                        <div class="metadata-item">
-                            <strong>Incident ID:</strong> <code>${incident.incident_id}</code>
-                        </div>
-                        <div class="metadata-item">
-                            <strong>Timestamp:</strong> <code>${new Date(incident.timestamp).toLocaleString()}</code>
-                        </div>
+                        <div class="metadata-item"><strong>Service:</strong> <code>${escapeHtml(incident.service)}</code></div>
+                        <div class="metadata-item"><strong>Incident ID:</strong> <code>${escapeHtml(incident.incident_id)}</code></div>
+                        <div class="metadata-item"><strong>Timestamp:</strong> <code>${new Date(incident.timestamp).toLocaleString()}</code></div>
                         <div class="metadata-item">
                             <strong>Severity:</strong>
                             <span class="severity-badge" style="background-color: ${severityColor};">
-                                ${incident.severity.toUpperCase()}
+                                ${escapeHtml((incident.severity || "unknown").toUpperCase())}
                             </span>
                         </div>
                         <div class="metadata-item" style="grid-column: 1 / -1;">
-                            <strong>Description:</strong> ${incident.alert_description}
+                            <strong>Description:</strong> ${escapeHtml(incident.alert_description)}
                         </div>
                     </div>
                 </section>
             `;
 
             document.getElementById("incident-content").innerHTML = `
+                ${statusBanner}
                 ${alertMetadata}
                 ${summariesSection}
                 ${rcaSection}
                 ${logAnomaliesSection}
                 ${metricAnomaliesSection}
+                ${deploymentsSection}
                 ${businessImpactSection}
                 ${recommendationsSection}
                 ${auditTrailSection}
             `;
         }
 
+        function auditDetail(inv) {
+            if (inv.reasoning) return escapeHtml(inv.reasoning);
+            if (inv.hypothesis) return `${escapeHtml(inv.hypothesis)} (${((inv.confidence || 0) * 100).toFixed(0)}%)`;
+            if (inv.data_requested) return escapeHtml(inv.data_requested.join("; "));
+            const findings = inv.findings || inv.data_points;
+            if (findings) {
+                return Object.entries(findings)
+                    .filter(([, v]) => typeof v !== "object")
+                    .map(([k, v]) => `${escapeHtml(k.replace(/_/g, " "))}: ${escapeHtml(v)}`)
+                    .join(", ");
+            }
+            return "—";
+        }
+
+        function sourceBadge(source) {
+            if (!source) return '<span class="mini-badge mini-badge-grey">rule</span>';
+            if (source.startsWith("llm")) {
+                const model = source.split(":")[1] || "llm";
+                return `<span class="mini-badge">${escapeHtml(model)}</span>`;
+            }
+            return `<span class="mini-badge mini-badge-grey">${escapeHtml(source)}</span>`;
+        }
+
         function toggleSection(titleElement) {
             const section = titleElement.parentElement;
             const content = section.querySelector(".section-content");
             const isOpen = content.style.display !== "none";
-
             content.style.display = isOpen ? "none" : "block";
-            titleElement.textContent = (isOpen ? "▶" : "▼") + titleElement.textContent.substring(1);
-        }
-
-        function escapeHtml(text) {
-            const div = document.createElement("div");
-            div.textContent = text;
-            return div.innerHTML;
+            titleElement.innerHTML = (isOpen ? "&#9654;" : "&#9660;") + titleElement.innerHTML.substring(1);
         }
 
         window.addEventListener("load", loadIncidentDetails);

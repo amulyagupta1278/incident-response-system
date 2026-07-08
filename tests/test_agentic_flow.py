@@ -138,6 +138,7 @@ def test_graph_visualization_renders() -> None:
 @pytest.mark.asyncio
 async def test_agentic_graph_completes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     state: IncidentState = make_state(incident_id="test-e2e")
     result: IncidentState = await run_incident_analysis(state)
 
@@ -156,6 +157,7 @@ async def test_agentic_graph_loops_on_low_confidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     state: IncidentState = make_state(
         incident_id="test-loop",
         service="unknown-service",

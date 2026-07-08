@@ -4,6 +4,9 @@ from agents import IncidentState
 
 
 def executive_summary(state: IncidentState) -> IncidentState:
+    if not state.recovery_recommendations:
+        state.recovery_recommendations = _default_recommendations(state)
+
     root_cause_info: str = ""
     if state.root_cause:
         root_cause_info = f"Root Cause: {state.root_cause['hypothesis']} (Confidence: {state.root_cause['confidence']*100:.0f}%)"
@@ -67,14 +70,6 @@ def executive_summary(state: IncidentState) -> IncidentState:
 
     state.executive_summary = "\n".join(executive_sections)
 
-    state.recovery_recommendations = [
-        "Investigate root cause hypothesis",
-        "Check recent deployments and rollback if necessary",
-        "Monitor affected service metrics closely",
-        "Prepare communication for impacted customers",
-        "Execute recovery procedures once root cause confirmed"
-    ]
-
     invocation: dict[str, Any] = {
         "agent": "executive_summary",
         "timestamp": datetime.now().isoformat(),
@@ -88,3 +83,36 @@ def executive_summary(state: IncidentState) -> IncidentState:
     state.agent_invocations.append(invocation)
 
     return state
+
+
+def _default_recommendations(state: IncidentState) -> list[str]:
+    hypothesis: str = (state.root_cause or {}).get("hypothesis", "").lower()
+
+    if "pool" in hypothesis or "connection" in hypothesis:
+        return [
+            "Rollback the deployment that reduced the connection pool size",
+            "Temporarily raise the DB connection pool limit",
+            "Monitor connection wait times until error rate returns to baseline",
+            "Add an alert on pool utilization above 80%",
+        ]
+    if "memory" in hypothesis or "leak" in hypothesis:
+        return [
+            "Restart affected instances on a rolling basis to reclaim memory",
+            "Bisect recent code changes for objects not being released",
+            "Capture a heap dump from a degraded instance for analysis",
+            "Add an alert on sustained memory growth and GC pause times",
+        ]
+    if "cascad" in hypothesis or "downstream" in hypothesis or "timeout" in hypothesis:
+        return [
+            "Enable circuit breaker on calls to the degraded downstream service",
+            "Reduce downstream call timeout and add retry budget limits",
+            "Engage the downstream service owning team",
+            "Serve degraded/cached responses until the dependency recovers",
+        ]
+    return [
+        "Investigate root cause hypothesis",
+        "Check recent deployments and rollback if necessary",
+        "Monitor affected service metrics closely",
+        "Prepare communication for impacted customers",
+        "Execute recovery procedures once root cause confirmed",
+    ]

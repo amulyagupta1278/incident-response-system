@@ -16,12 +16,18 @@ ALLOWED_EVENT_TYPES: set[str] = {
     "supabase_event",
     "app_error",
     "business_metric",
+    "browser_error",
+    "frontend_performance",
+    "api_failure",
+    "release_marker",
 }
 
 SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),
     re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[^'\"\s,}]+"),
     re.compile(r"(?i)authorization\s*[:=]\s*bearer\s+[A-Za-z0-9_\-\.]+"),
+    re.compile(r"(?i)([?&](?:token|key|secret|password|auth|authorization)=)[^&#\s]+"),
+    re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
 ]
 
 
@@ -46,6 +52,33 @@ def normalize_event(body: Dict[str, Any], project_id: str) -> Tuple[Dict[str, An
     if _raw_retention_enabled():
         event["raw_payload"] = redacted_payload
     return event, _chunks_for_event(event)
+
+
+def browser_event_to_body(payload: Dict[str, Any], project_id: str) -> Dict[str, Any]:
+    event_type: str = str(payload.get("event_type") or "browser_error")
+    if event_type not in {"browser_error", "frontend_performance", "api_failure"}:
+        event_type = "browser_error"
+    page_url: str = str(payload.get("page_url") or payload.get("url") or "")
+    return {
+        "project_id": project_id,
+        "event_type": event_type,
+        "source": "browser_sdk",
+        "service": str(payload.get("service") or "website"),
+        "environment": str(payload.get("environment") or "production"),
+        "timestamp": str(payload.get("timestamp") or datetime.now().isoformat()),
+        "payload": {
+            "message": payload.get("message") or payload.get("error") or "",
+            "stack": payload.get("stack") or "",
+            "page_url": page_url,
+            "route": payload.get("route") or _route_from_url(page_url),
+            "api_url": payload.get("api_url") or "",
+            "status_code": payload.get("status_code"),
+            "duration_ms": payload.get("duration_ms"),
+            "release_sha": payload.get("release_sha") or "",
+            "user_agent": payload.get("user_agent") or "",
+            "session_id": payload.get("session_id") or "",
+        },
+    }
 
 
 def github_event_to_body(payload: Dict[str, Any], event_name: str) -> Dict[str, Any]:
@@ -121,7 +154,7 @@ def _chunks_for_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
         }
     ]
     payload: Dict[str, Any] = event["payload"]
-    if event["event_type"] in {"log", "app_error", "supabase_event"}:
+    if event["event_type"] in {"log", "app_error", "supabase_event", "browser_error", "api_failure"}:
         message: str = str(payload.get("message") or payload.get("msg") or payload_text)
         chunks.append(
             {
@@ -138,7 +171,20 @@ def _chunks_for_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "text": payload_text,
             }
         )
+    if event["event_type"] in {"browser_error", "api_failure", "frontend_performance"}:
+        chunks.append(
+            {
+                "source_type": "user_impact_evidence",
+                "label": f"Browser impact: {event['service']}",
+                "text": payload_text,
+            }
+        )
     return chunks
+
+
+def _route_from_url(url: str) -> str:
+    match = re.match(r"^[a-z]+://[^/]+([^?#]*)", url)
+    return match.group(1) or "/" if match else url.split("?", 1)[0] or "/"
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:

@@ -95,6 +95,19 @@ def build_incident_chunks(record: dict[str, Any]) -> list[EvidenceChunk]:
     for index, invocation in enumerate(record.get("agent_invocations", []), start=1):
         add("audit", f"Agent invocation {index}: {invocation.get('agent')}", invocation)
 
+    for index, chunk in enumerate(record.get("external_evidence_chunks", []), start=1):
+        add(
+            "external_evidence",
+            f"External evidence {index}: {chunk.get('label')}",
+            chunk,
+        )
+
+    for index, edge in enumerate(record.get("evidence_edges", []), start=1):
+        add("evidence_edge", f"Evidence graph edge {index}: {edge.get('edge_type')}", edge)
+
+    if record.get("deployment_risk_report"):
+        add("deployment_risk", "Deployment risk report", record.get("deployment_risk_report"))
+
     add("summary", "Engineering summary", record.get("engineering_summary"))
     add("summary", "Executive summary", record.get("executive_summary"))
     return chunks

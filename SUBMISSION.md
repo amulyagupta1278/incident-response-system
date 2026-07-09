@@ -52,6 +52,35 @@ Step-by-step system behavior and walkthrough: **[WORKFLOW.md](WORKFLOW.md)**
 | Memory Leak | Code regression, memory not released | 72% | 5,000 | $1,500/min |
 | Cascading Failure | Timeout calling downstream payment-api | 80% | 3,000 | $1,200/min |
 
+## Universal Deployment Immune System Proof
+
+Beyond scenario files, the repo includes a deterministic acceptance smoke for the deployable gateway:
+
+```bash
+python scripts/hackathon_acceptance_smoke.py
+```
+
+This simulates a real customer integration:
+
+- project-scoped connector setup
+- strong server key for trusted API calls
+- public browser key limited to write-only ingest
+- browser origin allowlist
+- signed GitHub webhook
+- duplicate webhook delivery replay rejection
+- deploy SHA linked to browser/API failure evidence
+- automatic incident creation from error burst
+- persistent evidence chunks and evidence graph edges
+- cited Ask answer in offline retrieval-fallback mode
+
+Expected output includes:
+
+```text
+Hackathon acceptance smoke passed
+ask_citations=2
+security=server-key browser-write-only hmac replay-block origin-allowlist
+```
+
 ## Try It
 
 ```bash

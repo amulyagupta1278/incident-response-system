@@ -120,14 +120,27 @@ OPENAI_API_KEY=<server-side key>
 OPENAI_MODEL=gpt-4o
 LLM_STRICT_MODE=true
 ALLOWED_ORIGINS=https://your-nextjs-app.vercel.app,https://your-railway-domain.up.railway.app
+BROWSER_ALLOWED_ORIGINS=https://your-nextjs-app.vercel.app
 PUBLIC_BASE_URL=https://your-railway-domain.up.railway.app
 INGEST_API_KEYS=demo-project:<replace-with-strong-key>
+BROWSER_PUBLIC_KEYS=demo-project:<replace-with-public-browser-key>
 APP_ENV=production
 GATEWAY_WORKER_ENABLED=true
 RAW_PAYLOAD_RETENTION_DAYS=0
+CONNECTOR_SIGNATURES_REQUIRED=true
+GITHUB_WEBHOOK_SECRET=<github-webhook-secret>
+SUPABASE_WEBHOOK_SECRET=<supabase-webhook-secret>
 ```
 
 Next.js can be a separate frontend. Keep AI/RAG/OpenAI and webhook secrets on this Railway backend, then call `/api/v1/*` from Next.js with a server-side bearer key.
+
+Security model:
+
+- Server endpoints require `Authorization: Bearer <project-api-key>`.
+- Browser ingest uses a separate public write-only browser key and origin allowlist.
+- GitHub and Supabase webhooks should send HMAC SHA-256 signatures in production.
+- Connector delivery IDs are stored to reject replayed webhook deliveries.
+- All incident reads and Ask calls are project-scoped.
 
 ## Universal Ingest API
 
@@ -163,11 +176,41 @@ Useful production endpoints:
 
 - `POST /api/v1/events` - universal evidence ingest
 - `POST /api/v1/service-config` - project revenue/user config
+- `GET /api/v1/connectors/setup` - project-scoped copy-paste connector setup
 - `POST /api/v1/incidents` - queue incident analysis
 - `GET /api/v1/incidents/{incident_id}` - persistent incident state
 - `POST /api/v1/incidents/{incident_id}/ask` - cited RAG answer
 - `POST /api/v1/connectors/github/webhook` - GitHub webhook evidence
 - `POST /api/v1/connectors/supabase/webhook` - Supabase webhook evidence
+
+Connector setup helper:
+
+```bash
+curl -s "$PUBLIC_BASE_URL/api/v1/connectors/setup" \
+  -H "Authorization: Bearer <project-api-key>"
+```
+
+This returns project-scoped endpoint URLs, browser snippet, webhook header contract, and production security checklist. It never returns stored secret values.
+
+## Hackathon Acceptance Smoke
+
+Run one deterministic end-to-end demo without external services:
+
+```bash
+python scripts/hackathon_acceptance_smoke.py
+```
+
+It proves:
+
+- project-scoped connector setup
+- server API key required
+- browser key is write-only
+- browser origin allowlist blocks untrusted sites
+- GitHub webhook HMAC is required
+- duplicate webhook delivery is rejected
+- GitHub deploy evidence links to browser/API failure burst
+- incident auto-creates with evidence chunks and graph edges
+- Ask answer returns citations even in offline retrieval-fallback mode
 
 ## Project Structure
 

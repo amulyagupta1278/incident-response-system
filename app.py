@@ -16,14 +16,24 @@ load_dotenv()
 
 from agents import IncidentState
 from agents.agentic_system import get_compiled_graph
-from agents.event_gateway import github_event_to_body, normalize_event, supabase_event_to_body
+from agents.event_gateway import (
+    browser_event_to_body,
+    github_event_to_body,
+    normalize_event,
+    supabase_event_to_body,
+)
 from agents.gateway_store import (
     authenticate_api_key,
+    authenticate_browser_key,
     claim_next_job,
     create_incident,
+    create_incident_if_needed,
     get_incident as get_persistent_incident,
     init_store,
+    list_evidence_chunks,
+    list_evidence_edges,
     load_state_inputs,
+    record_webhook_delivery,
     save_evidence_event,
     save_incident_record,
     update_job,
@@ -237,6 +247,22 @@ def _require_project(authorization: str = "") -> str:
     return project_id
 
 
+def _require_browser_project(body: Dict[str, Any], authorization: str = "") -> str:
+    raw_key: str = _extract_bearer(authorization) or str(body.get("public_key") or "")
+    project_id: str | None = authenticate_browser_key(raw_key)
+    if not project_id:
+        raise HTTPException(status_code=401, detail="valid browser key required")
+    _enforce_rate_limit(f"browser:{project_id}")
+    body_project_id: str = str(body.get("project_id") or "")
+    if body_project_id and body_project_id != project_id:
+        raise HTTPException(status_code=403, detail="browser key project mismatch")
+    return project_id
+
+
+def _env_enabled(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+
+
 def _enforce_rate_limit(project_id: str) -> None:
     limit: int = int(os.getenv("INGEST_RATE_LIMIT_PER_MINUTE", "120"))
     now: float = time.time()
@@ -262,13 +288,119 @@ async def _request_json_with_limit(request: Request) -> Dict[str, Any]:
     return parsed
 
 
-def _verify_optional_signature(body: bytes, signature: str, secret_env: str) -> None:
+def _browser_allowed_origins() -> List[str]:
+    raw: str = os.getenv("BROWSER_ALLOWED_ORIGINS") or os.getenv("ALLOWED_ORIGINS", "")
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def _enforce_browser_origin(request: Request) -> None:
+    allowed: List[str] = _browser_allowed_origins()
+    if not allowed:
+        return
+    origin: str = request.headers.get("origin", "")
+    if origin not in allowed:
+        raise HTTPException(status_code=403, detail="browser origin not allowed")
+
+
+def _webhook_signatures_required() -> bool:
+    if _env_enabled("CONNECTOR_SIGNATURES_REQUIRED"):
+        return True
+    return os.getenv("APP_ENV", "development").lower() == "production"
+
+
+def _verify_webhook_signature(body: bytes, signature: str, secret_env: str) -> None:
     secret: str = os.getenv(secret_env, "")
     if not secret:
+        if _webhook_signatures_required():
+            raise HTTPException(
+                status_code=401,
+                detail=f"{secret_env} must be configured before accepting connector webhooks",
+            )
         return
+    if not signature:
+        raise HTTPException(status_code=401, detail="missing webhook signature")
     expected: str = "sha256=" + hmac.new(secret.encode(), body, "sha256").hexdigest()
     if not hmac.compare_digest(expected, signature):
         raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+
+def _record_connector_delivery(
+    project_id: str, connector_type: str, delivery_id: str
+) -> None:
+    if not record_webhook_delivery(project_id, connector_type, delivery_id):
+        raise HTTPException(status_code=409, detail="duplicate webhook delivery")
+
+
+def _public_base_url() -> str:
+    return os.getenv("PUBLIC_BASE_URL", "").rstrip("/") or "http://localhost:8000"
+
+
+def _connector_setup_payload(project_id: str) -> Dict[str, Any]:
+    base_url: str = _public_base_url()
+    return {
+        "project_id": project_id,
+        "security_model": {
+            "server_key": "Use Authorization: Bearer <project-api-key> only from trusted servers.",
+            "browser_key": "Use separate public browser key only for /api/v1/browser/events.",
+            "project_scope": "Authenticated key decides project_id; body project_id cannot override key scope.",
+            "webhook_signatures": "Set CONNECTOR_SIGNATURES_REQUIRED=true in production.",
+            "replay_protection": "Send stable delivery id headers so duplicate webhooks are rejected.",
+        },
+        "endpoints": {
+            "universal_ingest": f"{base_url}/api/v1/events",
+            "browser_ingest": f"{base_url}/api/v1/browser/events",
+            "github_webhook": f"{base_url}/api/v1/connectors/github/webhook",
+            "supabase_webhook": f"{base_url}/api/v1/connectors/supabase/webhook",
+            "create_incident": f"{base_url}/api/v1/incidents",
+            "ask_incident": f"{base_url}/api/v1/incidents/{{incident_id}}/ask",
+        },
+        "browser_snippet": (
+            f'<script src="{base_url}/sdk/immune-agent.js" '
+            f'data-project-id="{project_id}" '
+            'data-public-key="<browser-public-key>" '
+            'data-service="<service-name>" '
+            'data-environment="production" '
+            'data-release-sha="<git-sha>"></script>'
+        ),
+        "github_webhook": {
+            "url": f"{base_url}/api/v1/connectors/github/webhook",
+            "content_type": "application/json",
+            "secret_env": "GITHUB_WEBHOOK_SECRET",
+            "required_headers": {
+                "Authorization": "Bearer <project-api-key>",
+                "X-GitHub-Event": "<github-event>",
+                "X-GitHub-Delivery": "<delivery-id>",
+                "X-Hub-Signature-256": "sha256=<hmac>",
+            },
+        },
+        "supabase_webhook": {
+            "url": f"{base_url}/api/v1/connectors/supabase/webhook",
+            "content_type": "application/json",
+            "secret_env": "SUPABASE_WEBHOOK_SECRET",
+            "required_headers": {
+                "Authorization": "Bearer <project-api-key>",
+                "X-Supabase-Signature": "sha256=<hmac>",
+                "X-Supabase-Delivery": "<delivery-id>",
+            },
+        },
+        "production_env": {
+            "APP_ENV": "production",
+            "CONNECTOR_SIGNATURES_REQUIRED": "true",
+            "ALLOWED_ORIGINS": "https://your-nextjs-app.example",
+            "BROWSER_ALLOWED_ORIGINS": "https://your-website.example",
+            "RAW_PAYLOAD_RETENTION_DAYS": "0",
+        },
+    }
+
+
+def _with_gateway_context(record: Dict[str, Any]) -> Dict[str, Any]:
+    enriched: Dict[str, Any] = dict(record)
+    project_id: str = str(enriched.get("project_id") or "")
+    service: str = str(enriched.get("service") or "")
+    if project_id and service:
+        enriched["external_evidence_chunks"] = list_evidence_chunks(project_id, service)
+        enriched["evidence_edges"] = list_evidence_edges(project_id, service)
+    return enriched
 
 
 @app.get("/api/health")
@@ -310,6 +442,44 @@ async def ingest_event(
         "event_id": saved["event_id"],
         "project_id": project_id,
         "chunks_created": len(chunks),
+        "status": "accepted",
+    }
+
+
+@app.post("/api/v1/browser/events")
+async def ingest_browser_event(
+    request: Request, authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    _enforce_browser_origin(request)
+    body: Dict[str, Any] = await _request_json_with_limit(request)
+    project_id: str = _require_browser_project(body, authorization)
+    browser_body: Dict[str, Any] = browser_event_to_body(body, project_id)
+    event, chunks = normalize_event(browser_body, project_id)
+    saved: Dict[str, Any] = save_evidence_event(event, chunks)
+
+    incident = None
+    if event["event_type"] in {"browser_error", "api_failure"}:
+        recent_count: int = int(os.getenv("BROWSER_ERROR_TRIGGER_COUNT", "3"))
+        window_minutes: int = int(os.getenv("BROWSER_ERROR_TRIGGER_WINDOW_MINUTES", "5"))
+        from agents.gateway_store import count_recent_events
+
+        count: int = count_recent_events(
+            project_id, event["service"], {"browser_error", "api_failure"}, window_minutes
+        )
+        if count >= recent_count:
+            incident = create_incident_if_needed(
+                project_id=project_id,
+                service=event["service"],
+                environment=event["environment"],
+                alert_description=f"Browser/API failure burst on {event['service']} ({count} events/{window_minutes}m)",
+                severity="critical" if count >= recent_count * 2 else "high",
+                timestamp=event["timestamp"],
+            )
+    return {
+        "event_id": saved["event_id"],
+        "project_id": project_id,
+        "chunks_created": len(chunks),
+        "incident": incident,
         "status": "accepted",
     }
 
@@ -359,6 +529,12 @@ async def upsert_gateway_service_config(
     return {"project_id": project_id, "service": service, "status": "configured"}
 
 
+@app.get("/api/v1/connectors/setup")
+async def get_connector_setup(authorization: str = Header(default="")) -> Dict[str, Any]:
+    project_id: str = _require_project(authorization)
+    return _connector_setup_payload(project_id)
+
+
 @app.get("/api/v1/incidents/{incident_id}")
 async def get_gateway_incident(
     incident_id: str, authorization: str = Header(default="")
@@ -367,7 +543,7 @@ async def get_gateway_incident(
     record: Dict[str, Any] | None = get_persistent_incident(incident_id, project_id)
     if not record:
         raise HTTPException(status_code=404, detail="Incident not found")
-    return record
+    return _with_gateway_context(record)
 
 
 @app.post("/api/v1/incidents/{incident_id}/ask")
@@ -382,7 +558,7 @@ async def ask_gateway_incident(
     record: Dict[str, Any] | None = get_persistent_incident(incident_id, project_id)
     if not record:
         raise HTTPException(status_code=404, detail="Incident not found")
-    result: Dict[str, Any] = await answer_question(record, question)
+    result: Dict[str, Any] = await answer_question(_with_gateway_context(record), question)
     result["evidence_confidence"] = "high" if result.get("citations") else "insufficient"
     result["missing_evidence"] = [] if result.get("citations") else ["cited evidence"]
     return result
@@ -393,11 +569,13 @@ async def github_webhook(
     request: Request,
     authorization: str = Header(default=""),
     x_github_event: str = Header(default="push"),
+    x_github_delivery: str = Header(default=""),
     x_hub_signature_256: str = Header(default=""),
 ) -> Dict[str, Any]:
     project_id: str = _require_project(authorization)
     raw_body: bytes = await request.body()
-    _verify_optional_signature(raw_body, x_hub_signature_256, "GITHUB_WEBHOOK_SECRET")
+    _verify_webhook_signature(raw_body, x_hub_signature_256, "GITHUB_WEBHOOK_SECRET")
+    _record_connector_delivery(project_id, "github", x_github_delivery)
     payload: Any = await request.json()
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="JSON object required")
@@ -419,10 +597,15 @@ async def supabase_webhook(
     request: Request,
     authorization: str = Header(default=""),
     x_supabase_signature: str = Header(default=""),
+    x_supabase_delivery: str = Header(default=""),
+    x_request_id: str = Header(default=""),
 ) -> Dict[str, Any]:
     project_id: str = _require_project(authorization)
     raw_body: bytes = await request.body()
-    _verify_optional_signature(raw_body, x_supabase_signature, "SUPABASE_WEBHOOK_SECRET")
+    _verify_webhook_signature(raw_body, x_supabase_signature, "SUPABASE_WEBHOOK_SECRET")
+    _record_connector_delivery(
+        project_id, "supabase", x_supabase_delivery or x_request_id
+    )
     payload: Any = await request.json()
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="JSON object required")
@@ -626,6 +809,11 @@ async def serve_dashboard() -> FileResponse:
 @app.get("/styles.css")
 async def serve_styles() -> FileResponse:
     return FileResponse("frontend/styles.css", media_type="text/css")
+
+
+@app.get("/sdk/immune-agent.js")
+async def serve_immune_agent_sdk() -> FileResponse:
+    return FileResponse("frontend/immune-agent.js", media_type="application/javascript")
 
 
 @app.get("/incident/{incident_id}")

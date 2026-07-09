@@ -68,6 +68,14 @@
             return id;
         }
 
+        function formatMoney(value) {
+            return `$${Number(value || 0).toFixed(2)}`;
+        }
+
+        function compactLogEntry(entry) {
+            return `${entry.timestamp || ""} ${entry.level || ""} ${entry.message || ""}`;
+        }
+
         async function loadIncidentDetails() {
             const incidentId = getIncidentId();
             if (!incidentId) {
@@ -214,6 +222,65 @@
                 </section>
             `;
 
+            const impact = incident.revenue_impact_justification || {};
+            const impactJustificationSection = Object.keys(impact).length > 0 ? `
+                <section class="collapsible-section">
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Revenue Impact Justification</h3>
+                    <div class="section-content">
+                        <div class="impact-formula">
+                            <strong>${escapeHtml(impact.formula)}</strong>
+                            <span>${(impact.affected_users || 0).toLocaleString()} users &times; ${formatMoney(impact.revenue_per_user_per_minute)}/user/min = ${formatMoney(impact.revenue_impact_per_minute)}/minute</span>
+                        </div>
+                        <div class="detail-grid">
+                            <div class="detail-item"><strong>Source:</strong> ${escapeHtml(impact.impact_rate_source || "")}</div>
+                            <div class="detail-item"><strong>Observed Rate:</strong> ${((impact.observed_impact_rate || 0) * 100).toFixed(1)}%</div>
+                            <div class="detail-item"><strong>Bounded Rate:</strong> ${((impact.bounded_impact_rate || 0) * 100).toFixed(1)}%</div>
+                            <div class="detail-item"><strong>Range:</strong> ${formatMoney(impact.lower_bound_per_minute)}-${formatMoney(impact.upper_bound_per_minute)}/min</div>
+                            <div class="detail-item"><strong>User Limit:</strong> ${(impact.limits?.affected_users_ceiling || 0).toLocaleString()}</div>
+                            <div class="detail-item"><strong>Rate Limit:</strong> ${((impact.limits?.impact_rate_ceiling || 1) * 100).toFixed(0)}%</div>
+                        </div>
+                    </div>
+                </section>
+            ` : "";
+
+            const logCache = incident.log_context_cache || {};
+            const logContextSection = Object.keys(logCache).length > 0 ? `
+                <section class="collapsible-section">
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Centralized Log Context</h3>
+                    <div class="section-content">
+                        <div class="detail-grid">
+                            <div class="detail-item"><strong>Total Logs:</strong> ${(logCache.total_logs_scanned || 0).toLocaleString()}</div>
+                            <div class="detail-item"><strong>Cached Contexts:</strong> ${(logCache.error_contexts || []).length}</div>
+                            <div class="detail-item"><strong>Level Counts:</strong> ${escapeHtml(JSON.stringify(logCache.level_counts || {}))}</div>
+                        </div>
+                        ${(logCache.hierarchy || []).length > 0 ? `
+                            <div class="log-hierarchy">
+                                ${(logCache.hierarchy || []).map(item => `
+                                    <div class="log-hierarchy-row">
+                                        <span class="mini-badge mini-badge-${escapeHtml(item.severity || "grey")}">${escapeHtml(item.severity || "unknown")}</span>
+                                        <strong>${escapeHtml(item.type)}</strong>
+                                        <span>${item.count} events</span>
+                                        <span>${escapeHtml(item.first_seen || "")} &rarr; ${escapeHtml(item.last_seen || "")}</span>
+                                    </div>
+                                `).join("")}
+                            </div>
+                        ` : ""}
+                        ${(logCache.error_contexts || []).length > 0 ? `
+                            <details class="evidence-details">
+                                <summary>Error Context Windows (${(logCache.error_contexts || []).length})</summary>
+                                ${(logCache.error_contexts || []).map(ctx => `
+                                    <div class="log-context-window">
+                                        <strong>${escapeHtml(ctx.level)} / ${escapeHtml(ctx.pattern)}</strong>
+                                        <p>${escapeHtml(ctx.message)}</p>
+                                        <pre>${escapeHtml((ctx.context_window || []).map(compactLogEntry).join("\\n"))}</pre>
+                                    </div>
+                                `).join("")}
+                            </details>
+                        ` : ""}
+                    </div>
+                </section>
+            ` : "";
+
             const decisions = incident.remediation_decisions || {};
             const recommendationsSection = (incident.recovery_recommendations || []).length > 0 ? `
                 <section class="collapsible-section">
@@ -326,9 +393,11 @@
                 ${rcaSection}
                 ${similarSection}
                 ${logAnomaliesSection}
+                ${logContextSection}
                 ${metricAnomaliesSection}
                 ${deploymentsSection}
                 ${businessImpactSection}
+                ${impactJustificationSection}
                 ${recommendationsSection}
                 ${auditTrailSection}
             `;

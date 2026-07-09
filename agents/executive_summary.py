@@ -24,6 +24,9 @@ def executive_summary(state: IncidentState) -> IncidentState:
         ]
         metric_summary = f"Metric Anomalies: {', '.join(metric_summaries)}"
 
+    impact: dict[str, Any] = state.revenue_impact_justification or {}
+    log_cache: dict[str, Any] = state.log_context_cache or {}
+
     engineering_sections: list[str] = [
         f"Service: {state.service}",
         f"Alert: {state.alert_description}",
@@ -35,6 +38,35 @@ def executive_summary(state: IncidentState) -> IncidentState:
         "",
         root_cause_info if root_cause_info else "Root cause analysis pending"
     ]
+
+    if impact:
+        engineering_sections.extend(
+            [
+                "",
+                "Revenue Impact Justification:",
+                f"  Formula: {impact.get('formula')}",
+                (
+                    f"  Inputs: {impact.get('affected_users', 0):,} affected users, "
+                    f"${impact.get('revenue_per_user_per_minute', 0):.2f}/user/min"
+                ),
+                (
+                    f"  Bound: ${impact.get('lower_bound_per_minute', 0):.2f}-"
+                    f"${impact.get('upper_bound_per_minute', 0):.2f}/minute"
+                ),
+            ]
+        )
+
+    if log_cache:
+        engineering_sections.extend(
+            [
+                "",
+                "Centralized Log Context:",
+                (
+                    f"  Scanned {log_cache.get('total_logs_scanned', 0)} logs; "
+                    f"cached {len(log_cache.get('error_contexts', []))} error context windows"
+                ),
+            ]
+        )
 
     if state.root_cause and state.root_cause.get("supporting_evidence"):
         engineering_sections.append("")
@@ -58,6 +90,18 @@ def executive_summary(state: IncidentState) -> IncidentState:
         "IMPACT",
         f"  Affected Users: {state.affected_users:,}",
         f"  Revenue Impact: ${state.estimated_revenue_impact_per_minute:.2f}/minute",
+        (
+            f"  Justification: {impact.get('affected_users', state.affected_users):,} users x "
+            f"${impact.get('revenue_per_user_per_minute', 0):.2f}/user/min"
+            if impact
+            else "  Justification: pending"
+        ),
+        (
+            f"  Bounded Range: ${impact.get('lower_bound_per_minute', 0):.2f}-"
+            f"${impact.get('upper_bound_per_minute', 0):.2f}/minute"
+            if impact
+            else "  Bounded Range: pending"
+        ),
         "",
         "ROOT CAUSE",
         f"  {root_cause_info if root_cause_info else 'Analysis in progress'}",
@@ -65,6 +109,7 @@ def executive_summary(state: IncidentState) -> IncidentState:
         "CURRENT STATUS",
         f"  Analysis agents invoked: {len(state.agent_invocations)}",
         f"  Log anomalies found: {len(state.log_anomalies)}",
+        f"  Log context windows cached: {len(log_cache.get('error_contexts', []))}",
         f"  Metric anomalies found: {len(state.metric_anomalies)}"
     ]
 

@@ -44,12 +44,16 @@ def _serialize_state(values: Dict[str, Any]) -> Dict[str, Any]:
         "current_status": values.get("current_status", "initial"),
         "completed_steps": sorted(completed) if completed else [],
         "log_anomalies": values.get("log_anomalies", []),
+        "log_context_cache": values.get("log_context_cache", {}),
         "metric_anomalies": values.get("metric_anomalies", []),
         "deployment_changes": values.get("deployment_changes", []),
         "root_cause": values.get("root_cause"),
         "affected_users": values.get("affected_users", 0),
         "estimated_revenue_impact_per_minute": values.get(
             "estimated_revenue_impact_per_minute", 0.0
+        ),
+        "revenue_impact_justification": values.get(
+            "revenue_impact_justification", {}
         ),
         "engineering_summary": values.get("engineering_summary", ""),
         "executive_summary": values.get("executive_summary", ""),
@@ -208,6 +212,8 @@ async def decide_remediation(
 def _postmortem_markdown(record: Dict[str, Any]) -> str:
     rc: Dict[str, Any] = record.get("root_cause") or {}
     decisions: Dict[str, Any] = record.get("remediation_decisions", {})
+    impact: Dict[str, Any] = record.get("revenue_impact_justification") or {}
+    log_cache: Dict[str, Any] = record.get("log_context_cache") or {}
     lines: List[str] = [
         f"# Incident Postmortem — {record.get('service')}",
         "",
@@ -241,10 +247,35 @@ def _postmortem_markdown(record: Dict[str, Any]) -> str:
         "",
         f"- Affected users: {record.get('affected_users', 0):,}",
         f"- Estimated revenue impact: ${record.get('estimated_revenue_impact_per_minute', 0):.2f}/minute",
-        "",
-        "## Recovery Actions",
-        "",
     ]
+    if impact:
+        lines += [
+            (
+                f"- Justification: {impact.get('affected_users', 0):,} affected users x "
+                f"${impact.get('revenue_per_user_per_minute', 0):.2f}/user/min"
+            ),
+            (
+                f"- Bounded range: ${impact.get('lower_bound_per_minute', 0):.2f}-"
+                f"${impact.get('upper_bound_per_minute', 0):.2f}/minute"
+            ),
+            (
+                f"- Limit: impact rate capped at {impact.get('limits', {}).get('impact_rate_ceiling', 1.0):.0%}; "
+                f"affected users capped at {impact.get('limits', {}).get('affected_users_ceiling', 0):,}"
+            ),
+        ]
+    if log_cache:
+        lines += [
+            "",
+            "## Centralized Log Context",
+            "",
+            f"- Logs scanned: {log_cache.get('total_logs_scanned', 0):,}",
+            f"- Error context windows cached: {len(log_cache.get('error_contexts', []))}",
+        ]
+        for item in log_cache.get("hierarchy", []):
+            lines.append(
+                f"- {item.get('severity')} / {item.get('type')}: {item.get('count')} events"
+            )
+    lines += ["", "## Recovery Actions", ""]
     for i, rec in enumerate(record.get("recovery_recommendations", [])):
         status: str = decisions.get(str(i), {}).get("decision", "pending review")
         lines.append(f"{i + 1}. {rec} — _{status}_")

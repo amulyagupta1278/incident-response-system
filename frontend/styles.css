@@ -512,6 +512,10 @@ html, body {
     .metadata-grid {
         grid-template-columns: 1fr;
     }
+
+    .log-hierarchy-row {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* ===== Agentic live-dashboard additions ===== */
@@ -638,6 +642,68 @@ html, body {
 }
 
 .mini-badge-grey { background: #90a4ae; }
+.mini-badge-critical { background: #c62828; }
+.mini-badge-high { background: #ef6c00; }
+.mini-badge-medium { background: #f9a825; color: #263238; }
+
+.impact-formula {
+    background: white;
+    border-left: 3px solid #1976d2;
+    border-radius: 4px;
+    padding: 12px;
+    margin-bottom: 12px;
+    display: grid;
+    gap: 6px;
+    font-size: 13px;
+}
+
+.log-hierarchy {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.log-hierarchy-row {
+    display: grid;
+    grid-template-columns: 90px 1fr 90px minmax(180px, 1.4fr);
+    gap: 10px;
+    align-items: center;
+    background: white;
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-size: 12px;
+}
+
+.log-context-window {
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    padding: 10px;
+    margin-top: 10px;
+}
+
+.log-context-window p {
+    margin: 6px 0;
+    font-size: 12px;
+    color: #455a64;
+}
+
+.log-context-window pre {
+    background: #263238;
+    color: #eceff1;
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+}
+
+@media (max-width: 768px) {
+    .log-hierarchy-row {
+        grid-template-columns: 1fr;
+    }
+}
 
 .status-banner {
     background: #e3f2fd;

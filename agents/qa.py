@@ -17,10 +17,12 @@ CONTEXT_KEYS = (
     "current_status",
     "root_cause",
     "log_anomalies",
+    "log_context_cache",
     "metric_anomalies",
     "deployment_changes",
     "affected_users",
     "estimated_revenue_impact_per_minute",
+    "revenue_impact_justification",
     "recovery_recommendations",
     "similar_incidents",
 )
@@ -74,12 +76,38 @@ def _heuristic_answer(record: Dict[str, Any], question: str) -> str:
             f"Most likely root cause: {rc.get('hypothesis')} "
             f"({rc.get('confidence', 0) * 100:.0f}% confidence)."
         )
-    if "user" in q or "affect" in q or "impact" in q or "revenue" in q:
+    if "justify" in q or "justification" in q or "formula" in q or "revenue" in q:
+        impact = record.get("revenue_impact_justification") or {}
+        if not impact:
+            return (
+                f"{record.get('affected_users', 0):,} users affected; estimated revenue "
+                f"impact ${record.get('estimated_revenue_impact_per_minute', 0):.2f}/minute."
+            )
+        return (
+            f"Revenue impact uses {impact.get('formula')}: "
+            f"{impact.get('affected_users', 0):,} users x "
+            f"${impact.get('revenue_per_user_per_minute', 0):.2f}/user/min = "
+            f"${impact.get('revenue_impact_per_minute', 0):.2f}/minute. "
+            f"Bounded range is ${impact.get('lower_bound_per_minute', 0):.2f}-"
+            f"${impact.get('upper_bound_per_minute', 0):.2f}/minute."
+        )
+    if "user" in q or "affect" in q or "impact" in q:
         return (
             f"{record.get('affected_users', 0):,} users affected; estimated revenue "
             f"impact ${record.get('estimated_revenue_impact_per_minute', 0):.2f}/minute."
         )
     if "log" in q or "error" in q:
+        cache = record.get("log_context_cache") or {}
+        if "context" in q or "cache" in q or "hierarchy" in q or "history" in q:
+            hierarchy = ", ".join(
+                f"{h.get('severity')}/{h.get('type')} ({h.get('count')})"
+                for h in cache.get("hierarchy", [])
+            )
+            return (
+                f"Centralized log cache scanned {cache.get('total_logs_scanned', 0)} logs "
+                f"and kept {len(cache.get('error_contexts', []))} error context windows. "
+                f"Hierarchy: {hierarchy or 'none'}."
+            )
         types = ", ".join(
             f"{a.get('type')} (x{a.get('count')})" for a in record.get("log_anomalies", [])
         )

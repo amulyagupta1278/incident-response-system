@@ -44,6 +44,13 @@ def metrics_analysis(state: IncidentState) -> IncidentState:
         "agent": "metrics_analysis",
         "timestamp": datetime.now().isoformat(),
         "action": "analyze_metrics",
+        "reasoning": (
+            f"Compared {len(baseline_metrics)} metrics against baseline; "
+            f"{len(state.metric_anomalies)} spiked beyond the 50% threshold: "
+            + (", ".join(
+                f"{m['metric_name']} {m['percent_change']:+.0f}%" for m in state.metric_anomalies
+            ) or "none")
+        ),
         "findings": {
             "anomalies_detected": len(state.metric_anomalies),
             "metrics_checked": len(baseline_metrics),

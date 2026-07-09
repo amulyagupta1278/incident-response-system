@@ -45,7 +45,7 @@ def get_service_config(service: str) -> Dict[str, Any]:
 async def call_llm_for_rca(
     logs_str: str, metrics_str: str, deployments_str: str
 ) -> Dict[str, Any]:
-    """Ask the configured LLM (OpenAI or Anthropic) to reason over incident
+    """Ask the configured LLM (OpenAI) to reason over incident
     evidence and return a root cause hypothesis."""
     from agents.llm import complete_json
 
@@ -67,5 +67,3 @@ async def call_llm_for_rca(
     )
 
 
-# Backwards-compatible alias (previous name)
-call_claude_for_rca = call_llm_for_rca

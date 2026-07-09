@@ -17,7 +17,7 @@ The AI Operations Command Center is a multi-agent system that orchestrates auton
 5. **Business Impact** - Calculate affected users and revenue impact
 6. **Executive Summary** - Generate engineering and executive reports
 
-Powered by LangGraph orchestration with LLM reasoning from **OpenAI or Anthropic** (auto-detected from your API key). The router, RCA, and report-writing agents all reason with the LLM; every agent has a deterministic fallback so the system also runs fully offline in heuristic mode.
+Powered by LangGraph orchestration with LLM reasoning from **OpenAI (ChatGPT / GPT-4o)**. The router, RCA, and report-writing agents all reason with the LLM; every agent has a deterministic fallback so the system also runs fully offline in heuristic mode.
 
 ## Architecture
 
@@ -40,7 +40,7 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# paste your OPENAI_API_KEY (or ANTHROPIC_API_KEY) into .env
+# paste your OPENAI_API_KEY into .env
 
 pytest
 python app.py
@@ -131,7 +131,7 @@ All three scenarios pass with:
 - **Python 3.10+** - Core language
 - **LangGraph** - Agent orchestration
 - **FastAPI** - REST backend (analysis runs as a background task; the UI polls live progress)
-- **OpenAI (gpt-4o) or Anthropic (claude-opus-4-8)** - LLM reasoning, selected via `LLM_PROVIDER` / API keys in `.env`
+- **OpenAI (gpt-4o)** - LLM reasoning, configured via `OPENAI_API_KEY` in `.env`
 - **Pydantic** - Data validation
 - **pytest** - Testing
 - **Vanilla HTML/CSS/JavaScript** - Frontend (no build step)
@@ -159,7 +159,7 @@ All three scenarios pass with:
 ## Next Steps
 
 - Implement live Datadog/Splunk integration
-- Add Claude API integration for natural language RCA generation
+- Add Codex-style code-change analysis for deployment diffs
 - Create automated remediation playbooks
 - Build Slack/PagerDuty notification system
 - Implement multi-step recovery automation

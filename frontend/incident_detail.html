@@ -16,6 +16,17 @@
         <div id="incident-content" class="incident-content">
             <p class="loading">Loading incident details...</p>
         </div>
+
+        <section class="chat-section">
+            <h3>&#128172; Ask the Incident</h3>
+            <div id="chat-log" class="chat-log"></div>
+            <div class="chat-input-row">
+                <input id="chat-input" type="text"
+                       placeholder="e.g. What changed before the incident? How many users are affected?"
+                       onkeydown="if (event.key === 'Enter') askIncident()">
+                <button class="btn btn-primary" onclick="askIncident()">Ask</button>
+            </div>
+        </section>
     </div>
 
     <script>
@@ -35,7 +46,8 @@
             rca_analysis: "RCA Agent",
             request_more_data_agent: "Request More Data",
             business_impact: "Business Impact",
-            executive_summary: "Executive Summary"
+            executive_summary: "Executive Summary",
+            memory: "Incident Memory"
         };
 
         let poller = null;
@@ -108,12 +120,25 @@
                             </div>
                             <span>${(incident.root_cause.confidence * 100).toFixed(0)}%</span>
                         </div>
+                        ${incident.root_cause.deploy_correlation ? `
+                            <div class="deploy-callout">&#9889; ${escapeHtml(incident.root_cause.deploy_correlation)}</div>
+                        ` : ""}
                         <div class="evidence-list">
                             <strong>Supporting Evidence:</strong>
                             <ul>
                                 ${(incident.root_cause.supporting_evidence || []).map(e => `<li>${escapeHtml(e)}</li>`).join("")}
                             </ul>
                         </div>
+                        ${(incident.root_cause.ruled_out_hypotheses || []).length > 0 ? `
+                            <div class="ruled-out-list">
+                                <strong>Alternatives Considered &amp; Ruled Out:</strong>
+                                <ul>
+                                    ${incident.root_cause.ruled_out_hypotheses.map(r => `
+                                        <li><s>${escapeHtml(r.hypothesis)}</s> &mdash; ${escapeHtml(r.reason)}</li>
+                                    `).join("")}
+                                </ul>
+                            </div>
+                        ` : ""}
                     </div>
                 </section>
             ` : "";
@@ -189,13 +214,43 @@
                 </section>
             `;
 
+            const decisions = incident.remediation_decisions || {};
             const recommendationsSection = (incident.recovery_recommendations || []).length > 0 ? `
                 <section class="collapsible-section">
-                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Recovery Recommendations</h3>
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Recovery Actions (Human Approval Required)</h3>
                     <div class="section-content">
-                        <ol>${incident.recovery_recommendations.map(rec => `<li>${escapeHtml(rec)}</li>`).join("")}</ol>
+                        ${incident.recovery_recommendations.map((rec, i) => {
+                            const d = decisions[String(i)];
+                            const controls = d
+                                ? `<span class="decision-badge decision-${d.decision}">${d.decision.toUpperCase()}</span>`
+                                : `<span class="decision-controls">
+                                       <button class="btn-approve" onclick="decideRemediation(${i}, 'approved')">Approve</button>
+                                       <button class="btn-reject" onclick="decideRemediation(${i}, 'rejected')">Reject</button>
+                                   </span>`;
+                            return `<div class="remediation-item"><span class="remediation-text">${i + 1}. ${escapeHtml(rec)}</span>${controls}</div>`;
+                        }).join("")}
+                        <p class="gate-note">No action is executed without explicit human approval.</p>
                     </div>
                 </section>
+            ` : "";
+
+            const similarSection = (incident.similar_incidents || []).length > 0 ? `
+                <section class="collapsible-section">
+                    <h3 class="section-title" onclick="toggleSection(this)">&#9660; Seen Before — Similar Past Incidents (${incident.similar_incidents.length})</h3>
+                    <div class="section-content">
+                        ${incident.similar_incidents.map(s => `
+                            <div class="similar-callout">&#128257; Matches incident #${s.number} on <strong>${escapeHtml(s.service)}</strong>
+                            (${escapeHtml(String(s.resolved_at || "").slice(0, 10))}) &mdash; ${escapeHtml(s.hypothesis)}
+                            <em>(${escapeHtml(s.match_reason || "")})</em></div>
+                        `).join("")}
+                    </div>
+                </section>
+            ` : "";
+
+            const actionsBar = incident.current_status === "complete" ? `
+                <div class="actions-bar">
+                    <a class="btn btn-primary" href="/api/incidents/${escapeHtml(incident.incident_id)}/postmortem">&#128196; Download Postmortem (.md)</a>
+                </div>
             ` : "";
 
             const auditTrailSection = (incident.agent_invocations || []).length > 0 ? `
@@ -265,9 +320,11 @@
 
             document.getElementById("incident-content").innerHTML = `
                 ${statusBanner}
+                ${actionsBar}
                 ${alertMetadata}
                 ${summariesSection}
                 ${rcaSection}
+                ${similarSection}
                 ${logAnomaliesSection}
                 ${metricAnomaliesSection}
                 ${deploymentsSection}
@@ -298,6 +355,46 @@
                 return `<span class="mini-badge">${escapeHtml(model)}</span>`;
             }
             return `<span class="mini-badge mini-badge-grey">${escapeHtml(source)}</span>`;
+        }
+
+        async function askIncident() {
+            const input = document.getElementById("chat-input");
+            const log = document.getElementById("chat-log");
+            const question = input.value.trim();
+            if (!question) return;
+            input.value = "";
+            log.innerHTML += `<div class="chat-msg chat-user">${escapeHtml(question)}</div>`;
+            log.innerHTML += `<div class="chat-msg chat-agent chat-pending">Thinking&hellip;</div>`;
+            log.scrollTop = log.scrollHeight;
+            try {
+                const res = await fetch(`/api/incidents/${getIncidentId()}/ask`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ question })
+                });
+                if (!res.ok) throw new Error(`status ${res.status}`);
+                const data = await res.json();
+                log.querySelector(".chat-pending").outerHTML =
+                    `<div class="chat-msg chat-agent">${escapeHtml(data.answer)} ${sourceBadge(data.source)}</div>`;
+            } catch (e) {
+                log.querySelector(".chat-pending").outerHTML =
+                    `<div class="chat-msg chat-agent">Sorry, something went wrong: ${escapeHtml(e.message)}</div>`;
+            }
+            log.scrollTop = log.scrollHeight;
+        }
+
+        async function decideRemediation(index, decision) {
+            try {
+                const res = await fetch(`/api/incidents/${getIncidentId()}/remediation/${index}/decision`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ decision })
+                });
+                if (!res.ok) throw new Error(`status ${res.status}`);
+                loadIncidentDetails();
+            } catch (e) {
+                console.error("Failed to record decision:", e);
+            }
         }
 
         function toggleSection(titleElement) {

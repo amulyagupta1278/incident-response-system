@@ -36,6 +36,11 @@
             </div>
         </section>
 
+        <section class="graph-section" id="graph-section" style="display: none;">
+            <h2 class="section-title" onclick="toggleGraph()">&#9654; Agent Architecture (rendered live from the LangGraph)</h2>
+            <div id="graph-container" style="display: none;"></div>
+        </section>
+
         <section class="incidents-section">
             <h2>Incidents</h2>
             <div id="incidents-list" class="incidents-list">
@@ -79,7 +84,8 @@
             rca_analysis: "RCA Agent",
             request_more_data_agent: "Request More Data",
             business_impact: "Business Impact",
-            executive_summary: "Executive Summary"
+            executive_summary: "Executive Summary",
+            memory: "Incident Memory"
         };
 
         const pollers = {};
@@ -168,6 +174,27 @@
             }, 700);
         }
 
+        const PIPELINE = [
+            ["load_data", "Data"],
+            ["log_analysis", "Logs"],
+            ["metrics_analysis", "Metrics"],
+            ["rca_analysis", "RCA"],
+            ["business_impact", "Impact"],
+            ["summary", "Report"]
+        ];
+
+        function pipelineHtml(incident) {
+            const done = new Set(incident.completed_steps || []);
+            const running = incident.current_status !== "complete" && incident.current_status !== "failed";
+            let activeFound = false;
+            return `<div class="pipeline">` + PIPELINE.map(([key, label]) => {
+                let cls = "pipeline-step";
+                if (done.has(key)) cls += " step-done";
+                else if (running && !activeFound) { cls += " step-active"; activeFound = true; }
+                return `<span class="${cls}">${label}</span>`;
+            }).join(`<span class="pipeline-arrow">&rarr;</span>`) + `</div>`;
+        }
+
         function statusChip(status) {
             if (status === "complete") return '<span class="status-chip status-complete">COMPLETE</span>';
             if (status === "failed") return '<span class="status-chip status-failed">FAILED</span>';
@@ -224,8 +251,15 @@
                     </div>
                     <p class="incident-description">${escapeHtml(incident.alert_description)}</p>
                 </div>
+                ${pipelineHtml(incident)}
                 <div class="incident-details">
                     <div class="detail-item"><strong>Root Cause:</strong> ${rcaHtml}</div>
+                    ${incident.root_cause && incident.root_cause.deploy_correlation
+                        ? `<div class="deploy-callout">&#9889; ${escapeHtml(incident.root_cause.deploy_correlation)}</div>`
+                        : ""}
+                    ${(incident.similar_incidents || []).length > 0
+                        ? `<div class="similar-callout">&#128257; Seen before: matches incident #${incident.similar_incidents[0].number} (${escapeHtml(incident.similar_incidents[0].hypothesis)})</div>`
+                        : ""}
                     <div class="confidence-meter">
                         <strong>Confidence:</strong>
                         <div class="confidence-bar"><div class="confidence-fill" style="width: ${confidence * 100}%;"></div></div>
@@ -255,10 +289,36 @@
             window.open(`/incident/${incidentId}?id=${incidentId}`, "_blank");
         }
 
+        async function loadGraph() {
+            try {
+                if (!window.mermaid) return;
+                const res = await fetch("/api/graph");
+                if (!res.ok) return;
+                const data = await res.json();
+                window.mermaid.initialize({ startOnLoad: false, theme: "neutral" });
+                const { svg } = await window.mermaid.render("agent-graph", data.mermaid);
+                document.getElementById("graph-container").innerHTML = svg;
+                document.getElementById("graph-section").style.display = "block";
+            } catch (e) {
+                console.warn("Agent graph rendering skipped:", e);
+            }
+        }
+
+        function toggleGraph() {
+            const container = document.getElementById("graph-container");
+            const title = document.querySelector("#graph-section .section-title");
+            const isOpen = container.style.display !== "none";
+            container.style.display = isOpen ? "none" : "block";
+            title.innerHTML = (isOpen ? "&#9654;" : "&#9660;") + title.innerHTML.substring(1);
+        }
+
         window.addEventListener("load", () => {
             loadConfig();
             loadExistingIncidents();
+            loadGraph();
         });
     </script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"
+            onload="loadGraph()" onerror="console.warn('mermaid CDN unavailable; graph panel hidden')"></script>
 </body>
 </html>

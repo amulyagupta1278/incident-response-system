@@ -6,13 +6,16 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 load_dotenv()
 
 from agents import IncidentState
 from agents.agentic_system import get_compiled_graph
 from agents.llm import get_model, get_provider
+from agents.memory import record_incident
+from agents.notify import post_war_room, war_room_configured
+from agents.qa import answer_question
 
 app: FastAPI = FastAPI(title="AI Operations Command Center")
 
@@ -51,6 +54,7 @@ def _serialize_state(values: Dict[str, Any]) -> Dict[str, Any]:
         "engineering_summary": values.get("engineering_summary", ""),
         "executive_summary": values.get("executive_summary", ""),
         "recovery_recommendations": values.get("recovery_recommendations", []),
+        "similar_incidents": values.get("similar_incidents", []),
         "agent_invocations": values.get("agent_invocations", []),
     }
 
@@ -59,6 +63,7 @@ async def _run_analysis(incident_id: str, state: IncidentState) -> None:
     """Stream the agent graph, updating the store after every node so the
     dashboard can render live agent activity."""
     graph: Any = get_compiled_graph()
+    notified: set = set()
     try:
         async for values in graph.astream(
             dict(vars(state)),
@@ -71,8 +76,33 @@ async def _run_analysis(incident_id: str, state: IncidentState) -> None:
             record["created_at"] = incident_store[incident_id].get("created_at")
             incident_store[incident_id] = record
 
+            root_cause: Dict[str, Any] = record.get("root_cause") or {}
+            if root_cause and "rca" not in notified:
+                notified.add("rca")
+                deploy_note: str = (
+                    f" ⚡ {root_cause['deploy_correlation']}"
+                    if root_cause.get("deploy_correlation")
+                    else ""
+                )
+                await post_war_room(
+                    f"🔍 Root cause identified for *{record.get('service')}*: "
+                    f"{root_cause.get('hypothesis')} "
+                    f"({root_cause.get('confidence', 0) * 100:.0f}% confidence)."
+                    f"{deploy_note}"
+                )
+
         if incident_store[incident_id].get("current_status") != "complete":
             incident_store[incident_id]["current_status"] = "complete"
+        record_incident(incident_store[incident_id])
+
+        final: Dict[str, Any] = incident_store[incident_id]
+        await post_war_room(
+            f"✅ Investigation complete for *{final.get('service')}*: "
+            f"{(final.get('root_cause') or {}).get('hypothesis', 'unknown cause')}. "
+            f"{final.get('affected_users', 0):,} users affected, "
+            f"${final.get('estimated_revenue_impact_per_minute', 0):.2f}/min revenue impact. "
+            f"Full report: http://localhost:8000/incident/{incident_id}"
+        )
     except Exception as exc:
         print(f"[app] analysis failed for {incident_id}: {exc}")
         incident_store[incident_id]["current_status"] = "failed"
@@ -91,6 +121,7 @@ async def get_config() -> Dict[str, Any]:
         "llm_provider": provider or "heuristic",
         "llm_model": get_model(),
         "agentic": True,
+        "war_room": war_room_configured(),
     }
 
 
@@ -118,6 +149,11 @@ async def trigger_incident(incident_data: Dict[str, Any]) -> Dict[str, Any]:
     incident_store[incident_id] = record
     incident_order.insert(0, incident_id)
 
+    await post_war_room(
+        f"🚨 Incident opened on *{state.service}* ({state.severity.upper()}): "
+        f"{state.alert_description} — agents dispatched. "
+        f"Live: http://localhost:8000/incident/{incident_id}"
+    )
     asyncio.create_task(_run_analysis(incident_id, state))
 
     return record
@@ -134,6 +170,113 @@ async def get_incident(incident_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Incident not found")
 
     return incident_store[incident_id]
+
+
+@app.post("/api/incidents/{incident_id}/ask")
+async def ask_incident(incident_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Natural-language Q&A grounded in one incident's investigation data."""
+    if incident_id not in incident_store:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    question: str = str(body.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+    answer, source = await answer_question(incident_store[incident_id], question)
+    return {"answer": answer, "source": source}
+
+
+@app.post("/api/incidents/{incident_id}/remediation/{step_index}/decision")
+async def decide_remediation(
+    incident_id: str, step_index: int, body: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Human-in-the-loop gate: no recovery action is considered actionable
+    until a human explicitly approves it."""
+    if incident_id not in incident_store:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    decision: str = str(body.get("decision", ""))
+    if decision not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="decision must be 'approved' or 'rejected'")
+    record: Dict[str, Any] = incident_store[incident_id]
+    if step_index < 0 or step_index >= len(record.get("recovery_recommendations", [])):
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    record.setdefault("remediation_decisions", {})[str(step_index)] = {
+        "decision": decision,
+        "decided_at": datetime.now().isoformat(),
+    }
+    return record
+
+
+def _postmortem_markdown(record: Dict[str, Any]) -> str:
+    rc: Dict[str, Any] = record.get("root_cause") or {}
+    decisions: Dict[str, Any] = record.get("remediation_decisions", {})
+    lines: List[str] = [
+        f"# Incident Postmortem — {record.get('service')}",
+        "",
+        f"- **Incident ID:** {record.get('incident_id')}",
+        f"- **Date:** {record.get('timestamp')}",
+        f"- **Severity:** {record.get('severity')}",
+        f"- **Alert:** {record.get('alert_description')}",
+        "",
+        "## Executive Summary",
+        "",
+        record.get("executive_summary") or "N/A",
+        "",
+        "## Root Cause",
+        "",
+        f"**{rc.get('hypothesis', 'Unknown')}** (confidence: {rc.get('confidence', 0) * 100:.0f}%)",
+        "",
+    ]
+    if rc.get("deploy_correlation"):
+        lines += [f"> ⚡ {rc['deploy_correlation']}", ""]
+    lines += ["### Supporting Evidence", ""]
+    lines += [f"- {e}" for e in rc.get("supporting_evidence", [])]
+    if rc.get("ruled_out_hypotheses"):
+        lines += ["", "### Alternatives Considered & Ruled Out", ""]
+        lines += [
+            f"- ~~{r.get('hypothesis')}~~ — {r.get('reason')}"
+            for r in rc["ruled_out_hypotheses"]
+        ]
+    lines += [
+        "",
+        "## Business Impact",
+        "",
+        f"- Affected users: {record.get('affected_users', 0):,}",
+        f"- Estimated revenue impact: ${record.get('estimated_revenue_impact_per_minute', 0):.2f}/minute",
+        "",
+        "## Recovery Actions",
+        "",
+    ]
+    for i, rec in enumerate(record.get("recovery_recommendations", [])):
+        status: str = decisions.get(str(i), {}).get("decision", "pending review")
+        lines.append(f"{i + 1}. {rec} — _{status}_")
+    if record.get("similar_incidents"):
+        lines += ["", "## Related Past Incidents", ""]
+        lines += [
+            f"- Incident #{s.get('number')} on {s.get('service')} "
+            f"({str(s.get('resolved_at', ''))[:10]}): {s.get('hypothesis')} — {s.get('match_reason')}"
+            for s in record["similar_incidents"]
+        ]
+    lines += ["", "## Investigation Timeline", ""]
+    for inv in record.get("agent_invocations", []):
+        detail: str = inv.get("reasoning") or inv.get("hypothesis") or inv.get("action", "")
+        lines.append(
+            f"- `{str(inv.get('timestamp', ''))[11:19]}` **{inv.get('agent')}** — {detail}"
+        )
+    lines += ["", "---", "", "_Generated automatically by AI Operations Command Center_", ""]
+    return "\n".join(lines)
+
+
+@app.get("/api/incidents/{incident_id}/postmortem")
+async def download_postmortem(incident_id: str) -> Response:
+    if incident_id not in incident_store:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    markdown: str = _postmortem_markdown(incident_store[incident_id])
+    return Response(
+        content=markdown,
+        media_type="text/markdown",
+        headers={
+            "Content-Disposition": f'attachment; filename="postmortem-{incident_id[:8]}.md"'
+        },
+    )
 
 
 @app.get("/")

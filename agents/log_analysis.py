@@ -63,6 +63,11 @@ def log_analysis(state: IncidentState) -> IncidentState:
         "agent": "log_analysis",
         "timestamp": datetime.now().isoformat(),
         "action": "analyze_logs",
+        "reasoning": (
+            f"Scanned {len(state.raw_logs)} log entries; found {timeout_count} timeout errors, "
+            f"{connection_error_count} connection/pool errors, {gc_warning_count} GC warnings "
+            f"→ {len(state.log_anomalies)} anomaly pattern(s)"
+        ),
         "findings": {
             "anomalies_detected": len(state.log_anomalies),
             "timeout_errors": timeout_count,

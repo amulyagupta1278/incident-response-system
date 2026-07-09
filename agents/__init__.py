@@ -20,6 +20,7 @@ class IncidentState:
     engineering_summary: str = ""
     executive_summary: str = ""
     recovery_recommendations: List[str] = field(default_factory=list)
+    similar_incidents: List[Dict[str, Any]] = field(default_factory=list)
     agent_invocations: List[Dict[str, Any]] = field(default_factory=list)
     completed_steps: Set[str] = field(default_factory=set)
     analysis_iterations: int = 0

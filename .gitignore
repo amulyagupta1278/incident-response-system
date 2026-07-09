@@ -47,15 +47,6 @@ pip-delete-this-directory.txt
 .env.prod
 secrets/
 
-# Claude-related files
-.claude/
-claude_output/
-claude_*.md
-claude_*.txt
-*.claude
-claude_history/
-claude_artifacts/
-claude_code_session/
 
 # Testing
 .pytest_cache/
@@ -90,3 +81,4 @@ yarn.lock
 *.swo
 *~
 .#*
+data/incident_memory.json

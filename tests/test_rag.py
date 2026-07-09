@@ -79,17 +79,17 @@ async def test_retrieve_chunks_uses_keyword_fallback_without_llm(
 
 
 @pytest.mark.asyncio
-async def test_answer_question_returns_structured_heuristic_without_llm(
+async def test_answer_question_returns_cited_retrieval_fallback_without_llm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     result = await answer_question(sample_record(), "How is revenue calculated?")
 
-    assert result["source"] == "heuristic"
+    assert result["source"] == "rag:retrieval-fallback"
     assert "Revenue impact uses" in result["answer"]
-    assert result["citations"] == []
-    assert result["retrieved_chunks"] == []
+    assert result["citations"]
+    assert result["retrieved_chunks"]
 
 
 @pytest.mark.asyncio

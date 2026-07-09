@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 from agents.llm import llm_available, llm_strict_mode
-from agents.rag import answer_with_rag
+from agents.rag import EvidenceChunk, answer_with_rag, build_incident_chunks, retrieve_chunks
 
 
 async def answer_question(record: Dict[str, Any], question: str) -> Dict[str, Any]:
@@ -9,8 +9,8 @@ async def answer_question(record: Dict[str, Any], question: str) -> Dict[str, An
 
     With OpenAI configured, this is a proper RAG path: build evidence chunks,
     retrieve the most relevant chunks, then answer only from those chunks with
-    citations. Without an LLM provider, return deterministic heuristic output
-    so the UI remains usable in local demo mode.
+    citations. Without an LLM provider, return deterministic retrieval output
+    with citations so the UI remains usable without allowing uncited claims.
     """
     if llm_available():
         try:
@@ -18,12 +18,43 @@ async def answer_question(record: Dict[str, Any], question: str) -> Dict[str, An
         except Exception as exc:
             if llm_strict_mode():
                 raise RuntimeError(f"RAG answer failed in strict mode: {exc}") from exc
-            print(f"[qa] RAG answer failed, using heuristic: {exc}")
+            print(f"[qa] RAG answer failed, using retrieval fallback: {exc}")
+    return await _retrieval_fallback_answer(record, question)
+
+
+async def _retrieval_fallback_answer(record: Dict[str, Any], question: str) -> Dict[str, Any]:
+    chunks: list[EvidenceChunk] = build_incident_chunks(record)
+    if not chunks:
+        return {
+            "answer": "No incident evidence is available yet.",
+            "source": "rag:retrieval-fallback:none",
+            "citations": [],
+            "retrieved_chunks": [],
+        }
+    retrieved: list[EvidenceChunk] = await retrieve_chunks(question, chunks)
+    if not retrieved:
+        return {
+            "answer": "Retrieved evidence was insufficient to produce a cited answer.",
+            "source": "rag:retrieval-fallback",
+            "citations": [],
+            "retrieved_chunks": [],
+        }
     return {
         "answer": _heuristic_answer(record, question),
-        "source": "heuristic",
-        "citations": [],
-        "retrieved_chunks": [],
+        "source": "rag:retrieval-fallback",
+        "citations": [
+            {"chunk_id": chunk.chunk_id, "label": chunk.label}
+            for chunk in retrieved[:3]
+        ],
+        "retrieved_chunks": [
+            {
+                "chunk_id": chunk.chunk_id,
+                "label": chunk.label,
+                "source_type": chunk.source_type,
+                "text": chunk.text,
+            }
+            for chunk in retrieved
+        ],
     }
 
 
@@ -40,7 +71,26 @@ def _heuristic_answer(record: Dict[str, Any], question: str) -> str:
             f"Yes - matches incident #{s.get('number')} on {s.get('service')}: "
             f"{s.get('hypothesis')} ({s.get('match_reason')})."
         )
+    if "rollback" in q:
+        risk: Dict[str, Any] = record.get("deployment_risk_report") or {}
+        edges = record.get("evidence_edges") or []
+        if risk:
+            return (
+                f"Report-only recommendation: {risk.get('recommended_action', 'need_more_evidence')}. "
+                f"Deployment correlation score is {risk.get('deployment_correlation_score', 0)}; "
+                "human approval is required before action."
+            )
+        if edges:
+            return (
+                "Rollback cannot be executed automatically. Evidence graph contains deploy/failure "
+                "correlation, so human should inspect changed files and error burst before approval."
+            )
+        return "Need more deployment evidence before rollback recommendation."
     if "deploy" in q or "change" in q or "before" in q:
+        edges = record.get("evidence_edges") or []
+        if edges:
+            edge_types = ", ".join(str(edge.get("edge_type")) for edge in edges[:3])
+            return f"Deployment evidence graph edges found: {edge_types}."
         return rc.get("deploy_correlation") or "No deployment correlation identified."
     if "root cause" in q or "cause" in q or "why" in q:
         if not rc:

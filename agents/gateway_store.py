@@ -22,6 +22,22 @@ def database_path() -> str:
     return str(root / "data" / "gateway.db")
 
 
+def database_backend() -> str:
+    url: str = os.getenv("DATABASE_URL", "").strip().lower()
+    if url.startswith(("postgres://", "postgresql://")):
+        return "postgres_configured"
+    return "sqlite"
+
+
+def production_sqlite_allowed() -> bool:
+    return os.getenv("ALLOW_SQLITE_IN_PRODUCTION", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     path: str = database_path()
@@ -55,7 +71,8 @@ def init_store() -> None:
                 key_hash TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL,
                 label TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                revoked_at TEXT
             );
             CREATE TABLE IF NOT EXISTS browser_public_keys (
                 key_hash TEXT PRIMARY KEY,
@@ -170,10 +187,29 @@ def init_store() -> None:
                 connector_type TEXT NOT NULL,
                 received_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS audit_events (
+                audit_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor_type TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                details_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
+        _ensure_column(conn, "project_api_keys", "revoked_at", "TEXT")
     seed_configured_api_keys()
     seed_configured_browser_keys()
+
+
+def _ensure_column(
+    conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str
+) -> None:
+    columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    if any(str(column["name"]) == column_name for column in columns):
+        return
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
 def seed_configured_api_keys() -> None:
@@ -219,6 +255,19 @@ def ensure_project(project_id: str, name: str, tenant_id: str = "default") -> No
         )
 
 
+def project_exists(project_id: str) -> bool:
+    try:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT project_id FROM projects WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        init_store()
+        return project_exists(project_id)
+    return bool(row)
+
+
 def add_api_key(project_id: str, raw_key: str, label: str) -> None:
     with connect() as conn:
         conn.execute(
@@ -228,6 +277,30 @@ def add_api_key(project_id: str, raw_key: str, label: str) -> None:
             """,
             (_hash_key(raw_key), project_id, label, datetime.now().isoformat()),
         )
+
+
+def revoke_project_api_keys(project_id: str, label: str | None = None) -> int:
+    now: str = datetime.now().isoformat()
+    with connect() as conn:
+        if label:
+            cursor = conn.execute(
+                """
+                UPDATE project_api_keys
+                SET revoked_at = ?
+                WHERE project_id = ? AND label = ? AND revoked_at IS NULL
+                """,
+                (now, project_id, label),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                UPDATE project_api_keys
+                SET revoked_at = ?
+                WHERE project_id = ? AND revoked_at IS NULL
+                """,
+                (now, project_id),
+            )
+    return int(cursor.rowcount)
 
 
 def add_browser_key(project_id: str, raw_key: str, label: str) -> None:
@@ -241,20 +314,90 @@ def add_browser_key(project_id: str, raw_key: str, label: str) -> None:
         )
 
 
+def revoke_browser_keys(project_id: str, label: str | None = None) -> int:
+    now: str = datetime.now().isoformat()
+    with connect() as conn:
+        if label:
+            cursor = conn.execute(
+                """
+                UPDATE browser_public_keys
+                SET revoked_at = ?
+                WHERE project_id = ? AND label = ? AND revoked_at IS NULL
+                """,
+                (now, project_id, label),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                UPDATE browser_public_keys
+                SET revoked_at = ?
+                WHERE project_id = ? AND revoked_at IS NULL
+                """,
+                (now, project_id),
+            )
+    return int(cursor.rowcount)
+
+
+def upsert_connector_config(
+    project_id: str, connector_type: str, config: Dict[str, Any]
+) -> None:
+    now: str = datetime.now().isoformat()
+    connector_id: str = f"{project_id}:{connector_type}"
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO connector_configs (
+                connector_id, project_id, connector_type, config_json, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(connector_id) DO UPDATE SET
+                config_json = excluded.config_json
+            """,
+            (
+                connector_id,
+                project_id,
+                connector_type,
+                json.dumps(config, default=str),
+                now,
+            ),
+        )
+
+
+def get_connector_config(project_id: str, connector_type: str) -> Optional[Dict[str, Any]]:
+    try:
+        with connect() as conn:
+            row = conn.execute(
+                """
+                SELECT config_json FROM connector_configs
+                WHERE project_id = ? AND connector_type = ?
+                """,
+                (project_id, connector_type),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        init_store()
+        return get_connector_config(project_id, connector_type)
+    return json.loads(row["config_json"]) if row else None
+
+
 def authenticate_api_key(raw_key: str) -> Optional[str]:
     if not raw_key:
         return None
     try:
         with connect() as conn:
             row = conn.execute(
-                "SELECT project_id FROM project_api_keys WHERE key_hash = ?",
+                """
+                SELECT project_id FROM project_api_keys
+                WHERE key_hash = ? AND revoked_at IS NULL
+                """,
                 (_hash_key(raw_key),),
             ).fetchone()
     except sqlite3.OperationalError:
         init_store()
         with connect() as conn:
             row = conn.execute(
-                "SELECT project_id FROM project_api_keys WHERE key_hash = ?",
+                """
+                SELECT project_id FROM project_api_keys
+                WHERE key_hash = ? AND revoked_at IS NULL
+                """,
                 (_hash_key(raw_key),),
             ).fetchone()
     return str(row["project_id"]) if row else None
@@ -285,6 +428,23 @@ def authenticate_browser_key(raw_key: str) -> Optional[str]:
     return str(row["project_id"]) if row else None
 
 
+def project_has_browser_key(project_id: str) -> bool:
+    try:
+        with connect() as conn:
+            row = conn.execute(
+                """
+                SELECT key_hash FROM browser_public_keys
+                WHERE project_id = ? AND revoked_at IS NULL
+                LIMIT 1
+                """,
+                (project_id,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        init_store()
+        return project_has_browser_key(project_id)
+    return bool(row)
+
+
 def record_webhook_delivery(
     project_id: str, connector_type: str, delivery_id: str
 ) -> bool:
@@ -299,7 +459,7 @@ def record_webhook_delivery(
                 ) VALUES (?, ?, ?, ?)
                 """,
                 (
-                    f"{connector_type}:{delivery_id}",
+                    f"{project_id}:{connector_type}:{delivery_id}",
                     project_id,
                     connector_type,
                     datetime.now().isoformat(),
@@ -311,6 +471,74 @@ def record_webhook_delivery(
         init_store()
         return record_webhook_delivery(project_id, connector_type, delivery_id)
     return True
+
+
+def record_audit_event(
+    project_id: str,
+    event_type: str,
+    actor_type: str,
+    actor_id: str,
+    details: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    now: str = datetime.now().isoformat()
+    record: Dict[str, Any] = {
+        "audit_id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "event_type": event_type,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "details": _safe_audit_details(details or {}),
+        "created_at": now,
+    }
+    try:
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO audit_events (
+                    audit_id, project_id, event_type, actor_type, actor_id,
+                    details_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["audit_id"],
+                    project_id,
+                    event_type,
+                    actor_type,
+                    actor_id,
+                    json.dumps(record["details"], default=str),
+                    now,
+                ),
+            )
+    except sqlite3.OperationalError:
+        init_store()
+        return record_audit_event(project_id, event_type, actor_type, actor_id, details)
+    return record
+
+
+def list_audit_events(project_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    safe_limit: int = min(max(limit, 1), 500)
+    try:
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT audit_id, project_id, event_type, actor_type, actor_id,
+                       details_json, created_at
+                FROM audit_events
+                WHERE project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (project_id, safe_limit),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        init_store()
+        return list_audit_events(project_id, limit)
+    events: List[Dict[str, Any]] = []
+    for row in rows:
+        item: Dict[str, Any] = dict(row)
+        item["details"] = json.loads(item.pop("details_json"))
+        events.append(item)
+    return events
 
 
 def save_evidence_event(event: Dict[str, Any], chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -844,6 +1072,26 @@ def _payload_to_deployment(
         "deployed_by": str(payload.get("deployed_by") or payload.get("sender") or source),
         "status": str(payload.get("status") or "completed"),
     }
+
+
+def _safe_audit_details(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if any(
+                marker in key_text.lower()
+                for marker in ("secret", "token", "password", "authorization", "credentials", "key")
+            ):
+                cleaned[key_text] = "[REDACTED]"
+            else:
+                cleaned[key_text] = _safe_audit_details(item)
+        return cleaned
+    if isinstance(value, list):
+        return [_safe_audit_details(item) for item in value]
+    if isinstance(value, str) and len(value) > 500:
+        return value[:500] + "...[TRUNCATED]"
+    return value
 
 
 def _hash_key(raw_key: str) -> str:

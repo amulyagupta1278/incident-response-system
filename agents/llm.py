@@ -13,10 +13,18 @@ from typing import Any, Dict, Optional
 OPENAI_DEFAULT_MODEL: str = "gpt-4o"
 OPENAI_DEFAULT_EMBEDDING_MODEL: str = "text-embedding-3-small"
 OPENAI_DEFAULT_TIMEOUT_SECONDS: float = 20.0
+OPENAI_KEY_PLACEHOLDERS: set[str] = {
+    "sk-your-key-here",
+    "sk-your-openai-key",
+    "your-openai-api-key",
+    "<openai-api-key>",
+    "<server-side key>",
+}
 
 
 def get_provider() -> Optional[str]:
-    if os.getenv("OPENAI_API_KEY"):
+    key: str = os.getenv("OPENAI_API_KEY", "").strip()
+    if key and key.lower() not in OPENAI_KEY_PLACEHOLDERS:
         return "openai"
     return None
 

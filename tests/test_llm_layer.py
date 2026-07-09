@@ -24,6 +24,15 @@ def test_no_provider_without_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     assert get_model() == "heuristic"
 
 
+def test_placeholder_openai_key_does_not_enable_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-your-key-here")
+    assert get_provider() is None
+    assert not llm_available()
+    assert get_model() == "heuristic"
+
+
 def test_openai_provider_with_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     assert get_provider() == "openai"

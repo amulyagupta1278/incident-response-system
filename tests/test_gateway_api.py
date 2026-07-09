@@ -130,11 +130,373 @@ def test_connector_setup_requires_server_key_and_is_project_scoped(
     assert project_b.status_code == 200
     assert payload["project_id"] == "project-a"
     assert project_b.json()["project_id"] == "project-b"
-    assert payload["endpoints"]["github_webhook"] == (
-        "https://ops.example/api/v1/connectors/github/webhook"
+    assert payload["endpoints"]["github_direct_webhook"] == (
+        "https://ops.example/api/v1/connectors/github/project-a/webhook"
+    )
+    assert payload["github_webhook"]["url"] == (
+        "https://ops.example/api/v1/connectors/github/project-a/webhook"
+    )
+    assert payload["endpoints"]["supabase_direct_webhook"] == (
+        "https://ops.example/api/v1/connectors/supabase/project-a/webhook"
+    )
+    assert payload["supabase_webhook"]["url"] == (
+        "https://ops.example/api/v1/connectors/supabase/project-a/webhook"
     )
     assert 'data-project-id="project-a"' in payload["browser_snippet"]
     assert "do-not-leak" not in json.dumps(payload)
+
+
+def test_readiness_is_project_scoped_and_never_leaks_secrets(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEMO_MODE", "false")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://ops.example")
+    monkeypatch.setenv("ALLOWED_ORIGINS", "https://ops-ui.example")
+    monkeypatch.setenv("BROWSER_ALLOWED_ORIGINS", "https://shop.example")
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRETS", "project-a:github-secret")
+    monkeypatch.setenv("SUPABASE_WEBHOOK_SECRETS", "project-a:supabase-secret")
+    monkeypatch.setenv("RAW_PAYLOAD_RETENTION_DAYS", "0")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://ops.example/db")
+    client = make_client(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("GATEWAY_WORKER_ENABLED", "true")
+
+    missing = client.get("/api/v1/readiness")
+    browser = client.get("/api/v1/readiness", headers=auth("browser-a"))
+    response = client.get("/api/v1/readiness", headers=auth("key-a"))
+    payload = response.json()
+    serialized = json.dumps(payload)
+
+    assert missing.status_code == 401
+    assert browser.status_code == 401
+    assert response.status_code == 200
+    assert payload["project_id"] == "project-a"
+    assert payload["status"] == "ready"
+    assert payload["ai"]["provider"] == "openai"
+    assert payload["connectors"]["github_direct"] is True
+    assert payload["connectors"]["supabase_direct"] is True
+    assert payload["security"]["demo_mode"] is False
+    assert payload["missing"] == []
+    assert "github-secret" not in serialized
+    assert "supabase-secret" not in serialized
+
+
+def test_readiness_reports_blocked_production_security_gaps(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEMO_MODE", "true")
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "false")
+    monkeypatch.setenv("ALLOWED_ORIGINS", "")
+    monkeypatch.setenv("BROWSER_ALLOWED_ORIGINS", "")
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRETS", raising=False)
+    monkeypatch.delenv("SUPABASE_WEBHOOK_SECRETS", raising=False)
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("SUPABASE_WEBHOOK_SECRET", raising=False)
+    client = make_client(monkeypatch, tmp_path)
+
+    response = client.get("/api/v1/readiness", headers=auth("key-a"))
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["status"] == "blocked"
+    assert "github_secret" in payload["missing"]
+    assert "supabase_secret" in payload["missing"]
+    assert "browser_origin_allowlist" in payload["missing"]
+    assert "cors_allowlist" in payload["missing"]
+    assert "demo_routes_disabled" in payload["missing"]
+
+
+def test_admin_can_provision_project_without_project_env_entries(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ADMIN_API_KEY", "admin-secret")
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    client = make_client(monkeypatch, tmp_path)
+
+    provisioned = client.post(
+        "/api/v1/projects",
+        headers=auth("admin-secret"),
+        json={"project_id": "project-c", "name": "Project C"},
+    )
+    payload = provisioned.json()
+    server_key = payload["credentials"]["server_api_key"]
+    browser_key = payload["credentials"]["browser_public_key"]
+    github_secret = payload["credentials"]["github_webhook_secret"]
+    supabase_secret = payload["credentials"]["supabase_webhook_secret"]
+
+    setup = client.get("/api/v1/connectors/setup", headers=auth(server_key))
+    readiness = client.get("/api/v1/readiness", headers=auth(server_key))
+
+    github_body, github_signature = signed_body(
+        {
+            "repository": {"name": "web"},
+            "after": "new-project-sha",
+            "commits": [{"id": "new-project-sha", "message": "project c deploy"}],
+        },
+        github_secret,
+    )
+    github = client.post(
+        "/api/v1/connectors/github/project-c/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-GitHub-Delivery": "project-c-delivery",
+            "X-Hub-Signature-256": github_signature,
+            "Content-Type": "application/json",
+        },
+        content=github_body,
+    )
+    supabase_body, supabase_signature = signed_body(
+        {"service": "web", "type": "database_event", "message": "db healthy"},
+        supabase_secret,
+    )
+    supabase = client.post(
+        "/api/v1/connectors/supabase/project-c/webhook",
+        headers={
+            "X-Supabase-Delivery": "project-c-supabase",
+            "X-Supabase-Signature": supabase_signature,
+            "Content-Type": "application/json",
+        },
+        content=supabase_body,
+    )
+    browser = client.post(
+        "/api/v1/browser/events",
+        headers=auth(browser_key),
+        json={
+            "project_id": "project-c",
+            "event_type": "browser_error",
+            "service": "web",
+            "message": "project c browser error",
+        },
+    )
+    audit = client.get("/api/v1/audit", headers=auth(server_key))
+    other_project_audit = client.get("/api/v1/audit", headers=auth("key-a"))
+    audit_blob = json.dumps(audit.json())
+    audit_types = {event["event_type"] for event in audit.json()["events"]}
+
+    assert provisioned.status_code == 200
+    assert payload["project_id"] == "project-c"
+    assert setup.status_code == 200
+    assert setup.json()["project_id"] == "project-c"
+    assert readiness.status_code == 200
+    assert readiness.json()["connectors"]["github_direct"] is True
+    assert readiness.json()["connectors"]["supabase_direct"] is True
+    assert readiness.json()["connectors"]["browser_sensor"] is True
+    assert github.status_code == 200
+    assert supabase.status_code == 200
+    assert browser.status_code == 200
+    assert audit.status_code == 200
+    assert other_project_audit.status_code == 200
+    assert audit.json()["project_id"] == "project-c"
+    assert other_project_audit.json()["project_id"] == "project-a"
+    assert "project_provisioned" in audit_types
+    assert "connector_evidence_ingested" in audit_types
+    assert "browser_evidence_ingested" in audit_types
+    assert github_secret not in audit_blob
+    assert supabase_secret not in audit_blob
+    assert server_key not in audit_blob
+    assert browser_key not in audit_blob
+    assert "project-c" not in os.getenv("INGEST_API_KEYS", "")
+    assert "project-c" not in os.getenv("BROWSER_PUBLIC_KEYS", "")
+
+
+def test_project_provisioning_requires_admin_key(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    client = make_client(monkeypatch, tmp_path)
+
+    not_configured = client.post(
+        "/api/v1/projects",
+        headers=auth("admin-secret"),
+        json={"project_id": "project-c"},
+    )
+    monkeypatch.setenv("ADMIN_API_KEY", "admin-secret")
+    missing = client.post("/api/v1/projects", json={"project_id": "project-c"})
+    wrong = client.post(
+        "/api/v1/projects",
+        headers=auth("wrong-secret"),
+        json={"project_id": "project-c"},
+    )
+
+    assert not_configured.status_code == 503
+    assert missing.status_code == 401
+    assert wrong.status_code == 401
+
+
+def test_admin_can_rotate_project_credentials(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ADMIN_API_KEY", "admin-secret")
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    client = make_client(monkeypatch, tmp_path)
+
+    provisioned = client.post(
+        "/api/v1/projects",
+        headers=auth("admin-secret"),
+        json={"project_id": "project-d", "name": "Project D"},
+    )
+    initial = provisioned.json()["credentials"]
+
+    server_rotation = client.post(
+        "/api/v1/projects/project-d/rotate",
+        headers=auth("admin-secret"),
+        json={"credential_type": "server_api_key"},
+    )
+    new_server_key = server_rotation.json()["credentials"]["server_api_key"]
+    old_server_readiness = client.get(
+        "/api/v1/readiness", headers=auth(initial["server_api_key"])
+    )
+    new_server_readiness = client.get("/api/v1/readiness", headers=auth(new_server_key))
+
+    browser_rotation = client.post(
+        "/api/v1/projects/project-d/rotate",
+        headers=auth("admin-secret"),
+        json={"credential_type": "browser_public_key"},
+    )
+    new_browser_key = browser_rotation.json()["credentials"]["browser_public_key"]
+    old_browser = client.post(
+        "/api/v1/browser/events",
+        headers=auth(initial["browser_public_key"]),
+        json={
+            "project_id": "project-d",
+            "event_type": "browser_error",
+            "service": "web",
+            "message": "old browser key should fail",
+        },
+    )
+    new_browser = client.post(
+        "/api/v1/browser/events",
+        headers=auth(new_browser_key),
+        json={
+            "project_id": "project-d",
+            "event_type": "browser_error",
+            "service": "web",
+            "message": "new browser key should work",
+        },
+    )
+
+    github_rotation = client.post(
+        "/api/v1/projects/project-d/rotate",
+        headers=auth("admin-secret"),
+        json={"credential_type": "github_webhook_secret"},
+    )
+    new_github_secret = github_rotation.json()["credentials"]["github_webhook_secret"]
+    github_payload = {
+        "repository": {"name": "web"},
+        "after": "rotated-sha",
+        "commits": [{"id": "rotated-sha", "message": "rotated secret deploy"}],
+    }
+    old_github_body, old_github_signature = signed_body(
+        github_payload, initial["github_webhook_secret"]
+    )
+    new_github_body, new_github_signature = signed_body(
+        github_payload, new_github_secret
+    )
+    old_github = client.post(
+        "/api/v1/connectors/github/project-d/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-GitHub-Delivery": "project-d-old-github",
+            "X-Hub-Signature-256": old_github_signature,
+            "Content-Type": "application/json",
+        },
+        content=old_github_body,
+    )
+    new_github = client.post(
+        "/api/v1/connectors/github/project-d/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-GitHub-Delivery": "project-d-new-github",
+            "X-Hub-Signature-256": new_github_signature,
+            "Content-Type": "application/json",
+        },
+        content=new_github_body,
+    )
+
+    supabase_rotation = client.post(
+        "/api/v1/projects/project-d/rotate",
+        headers=auth("admin-secret"),
+        json={"credential_type": "supabase_webhook_secret"},
+    )
+    new_supabase_secret = supabase_rotation.json()["credentials"][
+        "supabase_webhook_secret"
+    ]
+    supabase_payload = {"service": "web", "type": "database_event", "message": "ok"}
+    old_supabase_body, old_supabase_signature = signed_body(
+        supabase_payload, initial["supabase_webhook_secret"]
+    )
+    new_supabase_body, new_supabase_signature = signed_body(
+        supabase_payload, new_supabase_secret
+    )
+    old_supabase = client.post(
+        "/api/v1/connectors/supabase/project-d/webhook",
+        headers={
+            "X-Supabase-Delivery": "project-d-old-supabase",
+            "X-Supabase-Signature": old_supabase_signature,
+            "Content-Type": "application/json",
+        },
+        content=old_supabase_body,
+    )
+    new_supabase = client.post(
+        "/api/v1/connectors/supabase/project-d/webhook",
+        headers={
+            "X-Supabase-Delivery": "project-d-new-supabase",
+            "X-Supabase-Signature": new_supabase_signature,
+            "Content-Type": "application/json",
+        },
+        content=new_supabase_body,
+    )
+    audit = client.get("/api/v1/audit", headers=auth(new_server_key))
+    rotation_events = [
+        event
+        for event in audit.json()["events"]
+        if event["event_type"] == "credential_rotated"
+    ]
+
+    assert provisioned.status_code == 200
+    assert server_rotation.status_code == 200
+    assert old_server_readiness.status_code == 401
+    assert new_server_readiness.status_code == 200
+    assert browser_rotation.status_code == 200
+    assert old_browser.status_code == 401
+    assert new_browser.status_code == 200
+    assert github_rotation.status_code == 200
+    assert old_github.status_code == 401
+    assert new_github.status_code == 200
+    assert supabase_rotation.status_code == 200
+    assert old_supabase.status_code == 401
+    assert new_supabase.status_code == 200
+    assert len(rotation_events) == 4
+    assert all(event["details"]["revoked_previous"] is True for event in rotation_events)
+
+
+def test_legacy_demo_routes_are_disabled_in_production(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEMO_MODE", "false")
+    client = make_client(monkeypatch, tmp_path)
+
+    response = client.post(
+        "/api/incidents/trigger",
+        json={"service": "api", "alert_description": "demo should be closed"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_legacy_demo_routes_work_in_development_default(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.delenv("DEMO_MODE", raising=False)
+    client = make_client(monkeypatch, tmp_path)
+
+    response = client.get("/api/incidents")
+
+    assert response.status_code == 200
 
 
 def test_browser_key_is_write_only(monkeypatch: Any, tmp_path: Path) -> None:
@@ -282,6 +644,67 @@ def test_github_webhook_requires_valid_signature_when_enabled(
     assert accepted.status_code == 200
 
 
+def test_direct_github_webhook_accepts_valid_signature_without_bearer(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRETS", "project-a:github-secret")
+    client = make_client(monkeypatch, tmp_path)
+    payload = {
+        "repository": {"name": "web"},
+        "after": "abc123",
+        "commits": [{"id": "abc123", "message": "change checkout flow"}],
+    }
+    body, signature = signed_body(payload, "github-secret")
+
+    response = client.post(
+        "/api/v1/connectors/github/project-a/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-GitHub-Delivery": "direct-delivery-1",
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["project_id"] == "project-a"
+    assert response.json()["mode"] == "direct"
+
+
+def test_direct_github_webhook_rejects_missing_or_invalid_signature(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRETS", "project-a:github-secret")
+    client = make_client(monkeypatch, tmp_path)
+    payload = {
+        "repository": {"name": "web"},
+        "after": "abc123",
+        "commits": [{"id": "abc123", "message": "change checkout flow"}],
+    }
+    body, _ = signed_body(payload, "github-secret")
+
+    missing = client.post(
+        "/api/v1/connectors/github/project-a/webhook",
+        headers={"X-GitHub-Event": "push", "Content-Type": "application/json"},
+        content=body,
+    )
+    invalid = client.post(
+        "/api/v1/connectors/github/project-a/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-Hub-Signature-256": "sha256=bad",
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+
+
 def test_duplicate_webhook_delivery_is_rejected(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -305,5 +728,147 @@ def test_duplicate_webhook_delivery_is_rejected(
     first = client.post("/api/v1/connectors/github/webhook", headers=headers, content=body)
     duplicate = client.post("/api/v1/connectors/github/webhook", headers=headers, content=body)
 
+    assert first.status_code == 200
+    assert duplicate.status_code == 409
+
+
+def test_direct_github_duplicate_delivery_is_rejected(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRETS", "project-a:github-secret")
+    client = make_client(monkeypatch, tmp_path)
+    payload = {
+        "repository": {"name": "web"},
+        "after": "abc123",
+        "commits": [{"id": "abc123", "message": "change checkout flow"}],
+    }
+    body, signature = signed_body(payload, "github-secret")
+    headers = {
+        "X-GitHub-Event": "push",
+        "X-GitHub-Delivery": "direct-delivery-dup",
+        "X-Hub-Signature-256": signature,
+        "Content-Type": "application/json",
+    }
+
+    first = client.post("/api/v1/connectors/github/project-a/webhook", headers=headers, content=body)
+    duplicate = client.post("/api/v1/connectors/github/project-a/webhook", headers=headers, content=body)
+
+    assert first.status_code == 200
+    assert duplicate.status_code == 409
+
+
+def test_webhook_delivery_replay_is_scoped_per_project(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv(
+        "GITHUB_WEBHOOK_SECRETS", "project-a:github-secret-a,project-b:github-secret-b"
+    )
+    client = make_client(monkeypatch, tmp_path)
+    payload = {
+        "repository": {"name": "web"},
+        "after": "abc123",
+        "commits": [{"id": "abc123", "message": "change checkout flow"}],
+    }
+    body_a, signature_a = signed_body(payload, "github-secret-a")
+    body_b, signature_b = signed_body(payload, "github-secret-b")
+
+    project_a = client.post(
+        "/api/v1/connectors/github/project-a/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-GitHub-Delivery": "shared-delivery-id",
+            "X-Hub-Signature-256": signature_a,
+            "Content-Type": "application/json",
+        },
+        content=body_a,
+    )
+    project_b = client.post(
+        "/api/v1/connectors/github/project-b/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-GitHub-Delivery": "shared-delivery-id",
+            "X-Hub-Signature-256": signature_b,
+            "Content-Type": "application/json",
+        },
+        content=body_b,
+    )
+
+    assert project_a.status_code == 200
+    assert project_b.status_code == 200
+
+
+def test_direct_supabase_webhook_accepts_valid_signature_without_bearer(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("SUPABASE_WEBHOOK_SECRETS", "project-a:supabase-secret")
+    client = make_client(monkeypatch, tmp_path)
+    payload = {
+        "service": "db",
+        "type": "database_event",
+        "table": "orders",
+        "record": {"id": 42, "status": "failed"},
+    }
+    body, signature = signed_body(payload, "supabase-secret")
+
+    response = client.post(
+        "/api/v1/connectors/supabase/project-a/webhook",
+        headers={
+            "X-Supabase-Delivery": "supabase-delivery-1",
+            "X-Supabase-Signature": signature,
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["project_id"] == "project-a"
+    assert response.json()["mode"] == "direct"
+
+
+def test_direct_supabase_webhook_rejects_invalid_signature_and_duplicate(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("SUPABASE_WEBHOOK_SECRETS", "project-a:supabase-secret")
+    client = make_client(monkeypatch, tmp_path)
+    payload = {
+        "service": "db",
+        "type": "auth_event",
+        "message": "auth failures rising",
+    }
+    body, signature = signed_body(payload, "supabase-secret")
+
+    invalid = client.post(
+        "/api/v1/connectors/supabase/project-a/webhook",
+        headers={
+            "X-Supabase-Delivery": "supabase-delivery-dup",
+            "X-Supabase-Signature": "sha256=bad",
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    first = client.post(
+        "/api/v1/connectors/supabase/project-a/webhook",
+        headers={
+            "X-Supabase-Delivery": "supabase-delivery-dup",
+            "X-Supabase-Signature": signature,
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    duplicate = client.post(
+        "/api/v1/connectors/supabase/project-a/webhook",
+        headers={
+            "X-Supabase-Delivery": "supabase-delivery-dup",
+            "X-Supabase-Signature": signature,
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+
+    assert invalid.status_code == 401
     assert first.status_code == 200
     assert duplicate.status_code == 409

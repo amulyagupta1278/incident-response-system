@@ -122,15 +122,21 @@ LLM_STRICT_MODE=true
 ALLOWED_ORIGINS=https://your-nextjs-app.vercel.app,https://your-railway-domain.up.railway.app
 BROWSER_ALLOWED_ORIGINS=https://your-nextjs-app.vercel.app
 PUBLIC_BASE_URL=https://your-railway-domain.up.railway.app
+ADMIN_API_KEY=<strong-admin-provisioning-key>
 INGEST_API_KEYS=demo-project:<replace-with-strong-key>
 BROWSER_PUBLIC_KEYS=demo-project:<replace-with-public-browser-key>
 APP_ENV=production
+DEMO_MODE=false
 GATEWAY_WORKER_ENABLED=true
 RAW_PAYLOAD_RETENTION_DAYS=0
 CONNECTOR_SIGNATURES_REQUIRED=true
+GITHUB_WEBHOOK_SECRETS=demo-project:<github-webhook-secret>
 GITHUB_WEBHOOK_SECRET=<github-webhook-secret>
+SUPABASE_WEBHOOK_SECRETS=demo-project:<supabase-webhook-secret>
 SUPABASE_WEBHOOK_SECRET=<supabase-webhook-secret>
 ```
+
+For one demo project, env keys are fine. For many real projects, use admin provisioning instead of adding every project to `.env`.
 
 Next.js can be a separate frontend. Keep AI/RAG/OpenAI and webhook secrets on this Railway backend, then call `/api/v1/*` from Next.js with a server-side bearer key.
 
@@ -141,10 +147,36 @@ Security model:
 - GitHub and Supabase webhooks should send HMAC SHA-256 signatures in production.
 - Connector delivery IDs are stored to reject replayed webhook deliveries.
 - All incident reads and Ask calls are project-scoped.
+- Legacy demo routes `/api/incidents/*` are disabled in production unless `DEMO_MODE=true`.
 
 ## Universal Ingest API
 
 Connect any app, GitHub repo, Supabase project, or backend by sending evidence:
+
+Create a new project without editing `.env`:
+
+```bash
+curl -s -X POST "$PUBLIC_BASE_URL/api/v1/projects" \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "checkout-prod",
+    "name": "Checkout Production"
+  }'
+```
+
+The response returns one-time credentials: server API key, browser public key, GitHub webhook secret, Supabase webhook secret, and project-scoped setup URLs. Store those values in the connected app/GitHub/Supabase secret manager. The normal project `.env` does not need `checkout-prod` entries after this.
+
+Rotate any project credential without editing `.env`:
+
+```bash
+curl -s -X POST "$PUBLIC_BASE_URL/api/v1/projects/checkout-prod/rotate" \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"credential_type": "github_webhook_secret"}'
+```
+
+Supported `credential_type` values: `server_api_key`, `browser_public_key`, `github_webhook_secret`, `supabase_webhook_secret`. Server/browser rotations revoke old keys. Webhook rotations replace stored connector secrets, so old signatures stop working.
 
 ```bash
 curl -s -X POST "$PUBLIC_BASE_URL/api/v1/events" \
@@ -175,13 +207,19 @@ curl -s -X POST "$PUBLIC_BASE_URL/api/v1/incidents" \
 Useful production endpoints:
 
 - `POST /api/v1/events` - universal evidence ingest
+- `POST /api/v1/projects` - admin-only project provisioning
+- `POST /api/v1/projects/{project_id}/rotate` - admin-only credential rotation
 - `POST /api/v1/service-config` - project revenue/user config
 - `GET /api/v1/connectors/setup` - project-scoped copy-paste connector setup
+- `GET /api/v1/readiness` - project-scoped runtime readiness and security audit
+- `GET /api/v1/audit` - project-scoped audit trail for admin, ingest, connector, and Ask actions
 - `POST /api/v1/incidents` - queue incident analysis
 - `GET /api/v1/incidents/{incident_id}` - persistent incident state
 - `POST /api/v1/incidents/{incident_id}/ask` - cited RAG answer
-- `POST /api/v1/connectors/github/webhook` - GitHub webhook evidence
-- `POST /api/v1/connectors/supabase/webhook` - Supabase webhook evidence
+- `POST /api/v1/connectors/github/{project_id}/webhook` - direct GitHub webhook evidence
+- `POST /api/v1/connectors/github/webhook` - bearer-auth GitHub relay evidence
+- `POST /api/v1/connectors/supabase/{project_id}/webhook` - direct Supabase webhook evidence
+- `POST /api/v1/connectors/supabase/webhook` - bearer-auth Supabase relay evidence
 
 Connector setup helper:
 
@@ -191,6 +229,28 @@ curl -s "$PUBLIC_BASE_URL/api/v1/connectors/setup" \
 ```
 
 This returns project-scoped endpoint URLs, browser snippet, webhook header contract, and production security checklist. It never returns stored secret values.
+
+Runtime readiness helper:
+
+```bash
+curl -s "$PUBLIC_BASE_URL/api/v1/readiness" \
+  -H "Authorization: Bearer <project-api-key>"
+```
+
+This returns `ready`, `degraded`, or `blocked` plus non-secret checks for OpenAI mode, direct GitHub/Supabase secrets, browser origin allowlist, demo-route status, payload limit, rate limit, and raw payload retention.
+
+Audit trail helper:
+
+```bash
+curl -s "$PUBLIC_BASE_URL/api/v1/audit?limit=50" \
+  -H "Authorization: Bearer <project-api-key>"
+```
+
+Audit events are project-scoped and redact secret-like fields. They record project provisioning, credential rotation, evidence ingestion, connector webhooks, auto-created incidents, business config changes, and Ask responses with citation counts.
+
+For GitHub UI, set Payload URL to `/api/v1/connectors/github/{project_id}/webhook`, content type to `application/json`, Secret to the matching project secret from `GITHUB_WEBHOOK_SECRETS`, and select push/pull request/deployment/release events as needed.
+
+For Supabase or Supabase-adjacent emitters, send signed JSON to `/api/v1/connectors/supabase/{project_id}/webhook` with `X-Supabase-Signature: sha256=<hmac>` and a stable `X-Supabase-Delivery` or `X-Request-ID`. Use `SUPABASE_WEBHOOK_SECRETS=project-id:secret` for project-specific secrets.
 
 ## Hackathon Acceptance Smoke
 

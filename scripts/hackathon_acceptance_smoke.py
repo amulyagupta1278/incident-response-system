@@ -16,11 +16,15 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def _set_demo_env(db_path: str) -> None:
     os.environ["DATABASE_PATH"] = db_path
+    os.environ["ALLOW_SQLITE_IN_PRODUCTION"] = "true"
     os.environ["PUBLIC_BASE_URL"] = "https://ops-demo.example"
     os.environ["APP_ENV"] = "production"
     os.environ["GATEWAY_WORKER_ENABLED"] = "false"
     os.environ["CONNECTOR_SIGNATURES_REQUIRED"] = "true"
+    os.environ["DEMO_MODE"] = "false"
+    os.environ["GITHUB_WEBHOOK_SECRETS"] = "hackathon-project:demo-github-secret"
     os.environ["GITHUB_WEBHOOK_SECRET"] = "demo-github-secret"
+    os.environ["SUPABASE_WEBHOOK_SECRETS"] = "hackathon-project:demo-supabase-secret"
     os.environ["SUPABASE_WEBHOOK_SECRET"] = "demo-supabase-secret"
     os.environ["INGEST_API_KEYS"] = "hackathon-project:hackathon-server-key"
     os.environ["BROWSER_PUBLIC_KEYS"] = "hackathon-project:hackathon-browser-key"
@@ -71,6 +75,17 @@ def main() -> None:
             setup.json()["project_id"] == "hackathon-project",
             "connector setup should be project scoped",
         )
+        readiness = client.get(
+            "/api/v1/readiness",
+            headers=_auth("hackathon-server-key"),
+        )
+        _expect(readiness.status_code == 200, "readiness should require valid server key")
+        _expect(readiness.json()["status"] == "degraded", "offline smoke should be degraded only by missing OpenAI")
+        _expect(
+            readiness.json()["connectors"]["github_direct"]
+            and readiness.json()["connectors"]["supabase_direct"],
+            "readiness should confirm direct connector secrets",
+        )
 
         service_config = client.post(
             "/api/v1/service-config",
@@ -97,24 +112,44 @@ def main() -> None:
         }
         body, signature = _signed_body(github_payload, "demo-github-secret")
         github_headers = {
-            **_auth("hackathon-server-key"),
             "Content-Type": "application/json",
             "X-GitHub-Event": "push",
             "X-GitHub-Delivery": "delivery-demo-1",
             "X-Hub-Signature-256": signature,
         }
         github = client.post(
-            "/api/v1/connectors/github/webhook",
+            "/api/v1/connectors/github/hackathon-project/webhook",
             headers=github_headers,
             content=body,
         )
         replay = client.post(
-            "/api/v1/connectors/github/webhook",
+            "/api/v1/connectors/github/hackathon-project/webhook",
             headers=github_headers,
             content=body,
         )
         _expect(github.status_code == 200, "signed GitHub webhook should ingest")
         _expect(replay.status_code == 409, "duplicate GitHub delivery should be rejected")
+
+        supabase_payload = {
+            "service": "web",
+            "type": "database_event",
+            "table": "orders",
+            "message": "No schema migration failures observed during checkout incident",
+            "record": {"status": "healthy", "failed_writes": 0},
+        }
+        supabase_body, supabase_signature = _signed_body(
+            supabase_payload, "demo-supabase-secret"
+        )
+        supabase = client.post(
+            "/api/v1/connectors/supabase/hackathon-project/webhook",
+            headers={
+                "Content-Type": "application/json",
+                "X-Supabase-Delivery": "supabase-demo-1",
+                "X-Supabase-Signature": supabase_signature,
+            },
+            content=supabase_body,
+        )
+        _expect(supabase.status_code == 200, "signed Supabase webhook should ingest")
 
         evil_browser = client.post(
             "/api/v1/browser/events",
@@ -174,12 +209,22 @@ def main() -> None:
         )
         _expect(ask.status_code == 200, "Ask endpoint should answer incident question")
         _expect(ask.json().get("citations"), "Ask answer should include citations")
+        audit = client.get(
+            "/api/v1/audit",
+            headers=_auth("hackathon-server-key"),
+        )
+        audit_types = {event["event_type"] for event in audit.json().get("events", [])}
+        _expect(audit.status_code == 200, "audit endpoint should be project scoped")
+        _expect("connector_evidence_ingested" in audit_types, "connector ingest should audit")
+        _expect("incident_ask_answered" in audit_types, "Ask response should audit")
 
         print("Hackathon acceptance smoke passed")
         print(f"project={record['project_id']} incident={incident_id}")
         print(f"evidence_chunks={len(record.get('external_evidence_chunks', []))}")
         print(f"evidence_edges={len(record.get('evidence_edges', []))}")
         print(f"ask_citations={len(ask.json().get('citations', []))}")
+        print(f"audit_events={len(audit.json().get('events', []))}")
+        print(f"readiness={readiness.json()['status']}")
         print("security=server-key browser-write-only hmac replay-block origin-allowlist")
 
 

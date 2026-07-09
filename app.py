@@ -1,6 +1,8 @@
 import asyncio
 import os
 import hmac
+import re
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -23,20 +25,33 @@ from agents.event_gateway import (
     supabase_event_to_body,
 )
 from agents.gateway_store import (
+    add_api_key,
+    add_browser_key,
     authenticate_api_key,
     authenticate_browser_key,
     claim_next_job,
     create_incident,
     create_incident_if_needed,
+    database_backend,
+    ensure_project,
+    get_connector_config,
     get_incident as get_persistent_incident,
     init_store,
     list_evidence_chunks,
     list_evidence_edges,
     load_state_inputs,
+    project_has_browser_key,
+    project_exists,
+    production_sqlite_allowed,
+    list_audit_events,
+    record_audit_event,
     record_webhook_delivery,
+    revoke_browser_keys,
+    revoke_project_api_keys,
     save_evidence_event,
     save_incident_record,
     update_job,
+    upsert_connector_config,
     upsert_service_business_config,
 )
 from agents.llm import get_model, get_provider, get_timeout_seconds, llm_strict_mode
@@ -247,6 +262,29 @@ def _require_project(authorization: str = "") -> str:
     return project_id
 
 
+def _require_admin(authorization: str = "") -> None:
+    configured: str = os.getenv("ADMIN_API_KEY", "").strip()
+    if not configured:
+        raise HTTPException(status_code=503, detail="ADMIN_API_KEY is not configured")
+    supplied: str = _extract_bearer(authorization)
+    if not secrets.compare_digest(supplied, configured):
+        raise HTTPException(status_code=401, detail="valid admin bearer key required")
+
+
+def _project_slug(raw: str) -> str:
+    project_id: str = raw.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,62}", project_id):
+        raise HTTPException(
+            status_code=400,
+            detail="project_id must be 3-63 lowercase letters, numbers, hyphens, or underscores",
+        )
+    return project_id
+
+
+def _new_project_secret(prefix: str) -> str:
+    return f"{prefix}_{secrets.token_urlsafe(32)}"
+
+
 def _require_browser_project(body: Dict[str, Any], authorization: str = "") -> str:
     raw_key: str = _extract_bearer(authorization) or str(body.get("public_key") or "")
     project_id: str | None = authenticate_browser_key(raw_key)
@@ -261,6 +299,16 @@ def _require_browser_project(body: Dict[str, Any], authorization: str = "") -> s
 
 def _env_enabled(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+
+
+def _demo_mode_enabled() -> bool:
+    default: str = "false" if os.getenv("APP_ENV", "development").lower() == "production" else "true"
+    return _env_enabled("DEMO_MODE", default)
+
+
+def _require_demo_mode() -> None:
+    if not _demo_mode_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 def _enforce_rate_limit(project_id: str) -> None:
@@ -308,13 +356,21 @@ def _webhook_signatures_required() -> bool:
     return os.getenv("APP_ENV", "development").lower() == "production"
 
 
-def _verify_webhook_signature(body: bytes, signature: str, secret_env: str) -> None:
-    secret: str = os.getenv(secret_env, "")
+def _raw_payload_retention_enabled() -> bool:
+    try:
+        return int(os.getenv("RAW_PAYLOAD_RETENTION_DAYS", "0")) > 0
+    except ValueError:
+        return False
+
+
+def _verify_signature_with_secret(
+    body: bytes, signature: str, secret: str, secret_label: str
+) -> None:
     if not secret:
         if _webhook_signatures_required():
             raise HTTPException(
                 status_code=401,
-                detail=f"{secret_env} must be configured before accepting connector webhooks",
+                detail=f"{secret_label} must be configured before accepting connector webhooks",
             )
         return
     if not signature:
@@ -322,6 +378,46 @@ def _verify_webhook_signature(body: bytes, signature: str, secret_env: str) -> N
     expected: str = "sha256=" + hmac.new(secret.encode(), body, "sha256").hexdigest()
     if not hmac.compare_digest(expected, signature):
         raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+
+def _verify_webhook_signature(body: bytes, signature: str, secret_env: str) -> None:
+    _verify_signature_with_secret(body, signature, os.getenv(secret_env, ""), secret_env)
+
+
+def _project_secret(env_name: str, project_id: str) -> str:
+    entries: list[str] = [
+        item.strip() for item in os.getenv(env_name, "").split(",") if item.strip()
+    ]
+    for entry in entries:
+        if ":" not in entry:
+            continue
+        entry_project, secret = entry.split(":", 1)
+        if entry_project.strip() == project_id:
+            return secret.strip()
+    return ""
+
+
+def _stored_connector_secret(project_id: str, connector_type: str) -> str:
+    config: Dict[str, Any] | None = get_connector_config(project_id, connector_type)
+    if not config:
+        return ""
+    return str(config.get("webhook_secret") or "").strip()
+
+
+def _github_webhook_secret(project_id: str) -> str:
+    return _stored_connector_secret(project_id, "github") or _project_secret(
+        "GITHUB_WEBHOOK_SECRETS", project_id
+    ) or os.getenv(
+        "GITHUB_WEBHOOK_SECRET", ""
+    )
+
+
+def _supabase_webhook_secret(project_id: str) -> str:
+    return _stored_connector_secret(project_id, "supabase") or _project_secret(
+        "SUPABASE_WEBHOOK_SECRETS", project_id
+    ) or os.getenv(
+        "SUPABASE_WEBHOOK_SECRET", ""
+    )
 
 
 def _record_connector_delivery(
@@ -350,7 +446,9 @@ def _connector_setup_payload(project_id: str) -> Dict[str, Any]:
             "universal_ingest": f"{base_url}/api/v1/events",
             "browser_ingest": f"{base_url}/api/v1/browser/events",
             "github_webhook": f"{base_url}/api/v1/connectors/github/webhook",
+            "github_direct_webhook": f"{base_url}/api/v1/connectors/github/{project_id}/webhook",
             "supabase_webhook": f"{base_url}/api/v1/connectors/supabase/webhook",
+            "supabase_direct_webhook": f"{base_url}/api/v1/connectors/supabase/{project_id}/webhook",
             "create_incident": f"{base_url}/api/v1/incidents",
             "ask_incident": f"{base_url}/api/v1/incidents/{{incident_id}}/ask",
         },
@@ -363,21 +461,37 @@ def _connector_setup_payload(project_id: str) -> Dict[str, Any]:
             'data-release-sha="<git-sha>"></script>'
         ),
         "github_webhook": {
-            "url": f"{base_url}/api/v1/connectors/github/webhook",
+            "url": f"{base_url}/api/v1/connectors/github/{project_id}/webhook",
             "content_type": "application/json",
-            "secret_env": "GITHUB_WEBHOOK_SECRET",
+            "secret_env": "GITHUB_WEBHOOK_SECRETS or GITHUB_WEBHOOK_SECRET",
+            "github_ui_setup": {
+                "payload_url": f"{base_url}/api/v1/connectors/github/{project_id}/webhook",
+                "content_type": "application/json",
+                "secret": "project GitHub webhook secret",
+                "events": ["push", "pull_request", "deployment", "release"],
+            },
             "required_headers": {
-                "Authorization": "Bearer <project-api-key>",
                 "X-GitHub-Event": "<github-event>",
                 "X-GitHub-Delivery": "<delivery-id>",
                 "X-Hub-Signature-256": "sha256=<hmac>",
             },
         },
         "supabase_webhook": {
-            "url": f"{base_url}/api/v1/connectors/supabase/webhook",
+            "url": f"{base_url}/api/v1/connectors/supabase/{project_id}/webhook",
             "content_type": "application/json",
-            "secret_env": "SUPABASE_WEBHOOK_SECRET",
+            "secret_env": "SUPABASE_WEBHOOK_SECRETS or SUPABASE_WEBHOOK_SECRET",
+            "direct_setup": {
+                "payload_url": f"{base_url}/api/v1/connectors/supabase/{project_id}/webhook",
+                "content_type": "application/json",
+                "secret": "project Supabase webhook secret",
+                "events": ["database", "auth", "edge_function", "storage", "custom"],
+            },
             "required_headers": {
+                "X-Supabase-Signature": "sha256=<hmac>",
+                "X-Supabase-Delivery": "<delivery-id>",
+            },
+            "relay_url": f"{base_url}/api/v1/connectors/supabase/webhook",
+            "relay_required_headers": {
                 "Authorization": "Bearer <project-api-key>",
                 "X-Supabase-Signature": "sha256=<hmac>",
                 "X-Supabase-Delivery": "<delivery-id>",
@@ -391,6 +505,156 @@ def _connector_setup_payload(project_id: str) -> Dict[str, Any]:
             "RAW_PAYLOAD_RETENTION_DAYS": "0",
         },
     }
+
+
+def _readiness_payload(project_id: str) -> Dict[str, Any]:
+    app_env: str = os.getenv("APP_ENV", "development").lower()
+    production: bool = app_env == "production"
+    checks: list[dict[str, Any]] = []
+
+    def add_check(name: str, passed: bool, severity: str, message: str) -> None:
+        checks.append(
+            {
+                "name": name,
+                "passed": passed,
+                "severity": severity,
+                "message": message,
+            }
+        )
+
+    add_check(
+        "server_api_key",
+        True,
+        "blocking",
+        "Request authenticated with project-scoped server API key.",
+    )
+    add_check(
+        "browser_write_key",
+        project_has_browser_key(project_id),
+        "warning",
+        "Project has browser write-only key configured for website sensor.",
+    )
+    add_check(
+        "openai_llm",
+        get_provider() == "openai",
+        "warning",
+        "OpenAI provider active; fallback mode only when key missing.",
+    )
+    add_check(
+        "connector_signatures",
+        _webhook_signatures_required(),
+        "blocking" if production else "warning",
+        "Connector HMAC signatures required.",
+    )
+    add_check(
+        "github_secret",
+        bool(_github_webhook_secret(project_id)),
+        "blocking" if production else "warning",
+        "GitHub direct webhook has project secret configured.",
+    )
+    add_check(
+        "supabase_secret",
+        bool(_supabase_webhook_secret(project_id)),
+        "blocking" if production else "warning",
+        "Supabase direct webhook has project secret configured.",
+    )
+    add_check(
+        "browser_origin_allowlist",
+        bool(_browser_allowed_origins()),
+        "blocking" if production else "warning",
+        "Browser ingest origin allowlist configured.",
+    )
+    add_check(
+        "cors_allowlist",
+        bool(os.getenv("ALLOWED_ORIGINS", "").strip()),
+        "blocking" if production else "warning",
+        "API CORS allowlist configured.",
+    )
+    add_check(
+        "demo_routes_disabled",
+        not _demo_mode_enabled(),
+        "blocking" if production else "info",
+        "Legacy demo routes disabled.",
+    )
+    add_check(
+        "raw_payload_retention",
+        not _raw_payload_retention_enabled(),
+        "warning",
+        "Raw payload retention disabled; redacted evidence chunks remain.",
+    )
+    add_check(
+        "worker_enabled",
+        _env_enabled("GATEWAY_WORKER_ENABLED", "true"),
+        "warning",
+        "Gateway worker enabled for queued incident jobs.",
+    )
+    storage_ready: bool = (
+        not production
+        or database_backend() == "postgres_configured"
+        or production_sqlite_allowed()
+    )
+    add_check(
+        "production_database",
+        storage_ready,
+        "blocking" if production else "info",
+        "Production should use DATABASE_URL-backed Postgres; SQLite allowed only by explicit override.",
+    )
+
+    blocking_failed: list[dict[str, Any]] = [
+        check for check in checks if check["severity"] == "blocking" and not check["passed"]
+    ]
+    warning_failed: list[dict[str, Any]] = [
+        check for check in checks if check["severity"] == "warning" and not check["passed"]
+    ]
+    status: str = "ready"
+    if blocking_failed:
+        status = "blocked"
+    elif warning_failed:
+        status = "degraded"
+
+    return {
+        "project_id": project_id,
+        "status": status,
+        "app_env": app_env,
+        "ai": {
+            "provider": get_provider() or "heuristic",
+            "model": get_model(),
+            "strict_mode": llm_strict_mode(),
+            "timeout_seconds": get_timeout_seconds(),
+        },
+        "connectors": {
+            "universal_ingest": True,
+            "browser_sensor": project_has_browser_key(project_id),
+            "github_direct": bool(_github_webhook_secret(project_id)),
+            "supabase_direct": bool(_supabase_webhook_secret(project_id)),
+        },
+        "security": {
+            "demo_mode": _demo_mode_enabled(),
+            "connector_signatures_required": _webhook_signatures_required(),
+            "browser_origin_allowlist": _browser_allowed_origins(),
+            "cors_allowlist": _allowed_origins(),
+            "raw_payload_retention_enabled": _raw_payload_retention_enabled(),
+            "max_payload_bytes": int(os.getenv("MAX_INGEST_PAYLOAD_BYTES", "262144")),
+            "rate_limit_per_minute": int(os.getenv("INGEST_RATE_LIMIT_PER_MINUTE", "120")),
+            "database_backend": database_backend(),
+            "sqlite_allowed_in_production": production_sqlite_allowed(),
+        },
+        "checks": checks,
+        "missing": [check["name"] for check in checks if not check["passed"]],
+    }
+
+
+def _audit(
+    project_id: str,
+    event_type: str,
+    actor_type: str,
+    actor_id: str,
+    details: Dict[str, Any] | None = None,
+) -> None:
+    try:
+        record_audit_event(project_id, event_type, actor_type, actor_id, details or {})
+    except Exception as exc:
+        print(f"[audit] failed to record {event_type} for {project_id}: {exc}")
 
 
 def _with_gateway_context(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -438,6 +702,19 @@ async def ingest_event(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     saved: Dict[str, Any] = save_evidence_event(event, chunks)
+    _audit(
+        project_id,
+        "evidence_ingested",
+        "server_api_key",
+        "project",
+        {
+            "event_id": saved["event_id"],
+            "event_type": event["event_type"],
+            "source": event["source"],
+            "service": event["service"],
+            "chunks_created": len(chunks),
+        },
+    )
     return {
         "event_id": saved["event_id"],
         "project_id": project_id,
@@ -456,6 +733,19 @@ async def ingest_browser_event(
     browser_body: Dict[str, Any] = browser_event_to_body(body, project_id)
     event, chunks = normalize_event(browser_body, project_id)
     saved: Dict[str, Any] = save_evidence_event(event, chunks)
+    _audit(
+        project_id,
+        "browser_evidence_ingested",
+        "browser_key",
+        "browser_sdk",
+        {
+            "event_id": saved["event_id"],
+            "event_type": event["event_type"],
+            "source": event["source"],
+            "service": event["service"],
+            "chunks_created": len(chunks),
+        },
+    )
 
     incident = None
     if event["event_type"] in {"browser_error", "api_failure"}:
@@ -475,6 +765,19 @@ async def ingest_browser_event(
                 severity="critical" if count >= recent_count * 2 else "high",
                 timestamp=event["timestamp"],
             )
+            if incident:
+                _audit(
+                    project_id,
+                    "incident_auto_created",
+                    "browser_key",
+                    "browser_sdk",
+                    {
+                        "incident_id": incident["incident_id"],
+                        "job_id": incident["job_id"],
+                        "service": event["service"],
+                        "trigger_count": count,
+                    },
+                )
     return {
         "event_id": saved["event_id"],
         "project_id": project_id,
@@ -482,6 +785,182 @@ async def ingest_browser_event(
         "incident": incident,
         "status": "accepted",
     }
+
+
+@app.post("/api/v1/projects")
+async def provision_project(
+    request: Request, authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    _require_admin(authorization)
+    body: Dict[str, Any] = await _request_json_with_limit(request)
+    requested_id: str = str(body.get("project_id") or "").strip()
+    project_id: str = _project_slug(requested_id or f"project-{secrets.token_hex(4)}")
+    if project_exists(project_id):
+        raise HTTPException(status_code=409, detail="project_id already exists")
+
+    name: str = str(body.get("name") or project_id).strip() or project_id
+    server_key: str = _new_project_secret("ir_server")
+    browser_key: str = _new_project_secret("ir_browser")
+    github_secret: str = _new_project_secret("ghwh")
+    supabase_secret: str = _new_project_secret("sbwh")
+
+    ensure_project(project_id, name)
+    add_api_key(project_id, server_key, "provisioned")
+    add_browser_key(project_id, browser_key, "provisioned")
+    upsert_connector_config(
+        project_id,
+        "github",
+        {
+            "webhook_secret": github_secret,
+            "created_by": "admin_provisioning",
+            "created_at": datetime.now().isoformat(),
+        },
+    )
+    upsert_connector_config(
+        project_id,
+        "supabase",
+        {
+            "webhook_secret": supabase_secret,
+            "created_by": "admin_provisioning",
+            "created_at": datetime.now().isoformat(),
+        },
+    )
+
+    setup: Dict[str, Any] = _connector_setup_payload(project_id)
+    _audit(
+        project_id,
+        "project_provisioned",
+        "admin",
+        "admin_api_key",
+        {
+            "name": name,
+            "credentials_issued": [
+                "server_api_key",
+                "browser_public_key",
+                "github_webhook_secret",
+                "supabase_webhook_secret",
+            ],
+        },
+    )
+    return {
+        "project_id": project_id,
+        "name": name,
+        "credentials": {
+            "server_api_key": server_key,
+            "browser_public_key": browser_key,
+            "github_webhook_secret": github_secret,
+            "supabase_webhook_secret": supabase_secret,
+        },
+        "setup": setup,
+        "warning": "Credentials are returned once. Store them in deployment secret manager.",
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/rotate")
+async def rotate_project_credential(
+    project_id: str, request: Request, authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    _require_admin(authorization)
+    project_id = _project_slug(project_id)
+    if not project_exists(project_id):
+        raise HTTPException(status_code=404, detail="project not found")
+    body: Dict[str, Any] = await _request_json_with_limit(request)
+    credential_type: str = str(body.get("credential_type") or "").strip()
+
+    if credential_type == "server_api_key":
+        revoke_project_api_keys(project_id, "provisioned")
+        new_key: str = _new_project_secret("ir_server")
+        add_api_key(project_id, new_key, "provisioned")
+        _audit(
+            project_id,
+            "credential_rotated",
+            "admin",
+            "admin_api_key",
+            {"credential_type": credential_type, "revoked_previous": True},
+        )
+        return {
+            "project_id": project_id,
+            "credential_type": credential_type,
+            "credentials": {"server_api_key": new_key},
+            "revoked_previous": True,
+            "warning": "Credential returned once. Update trusted server secret manager immediately.",
+        }
+    if credential_type == "browser_public_key":
+        revoke_browser_keys(project_id, "provisioned")
+        new_key = _new_project_secret("ir_browser")
+        add_browser_key(project_id, new_key, "provisioned")
+        _audit(
+            project_id,
+            "credential_rotated",
+            "admin",
+            "admin_api_key",
+            {"credential_type": credential_type, "revoked_previous": True},
+        )
+        return {
+            "project_id": project_id,
+            "credential_type": credential_type,
+            "credentials": {"browser_public_key": new_key},
+            "revoked_previous": True,
+            "warning": "Credential returned once. Update website snippet/config immediately.",
+        }
+    if credential_type == "github_webhook_secret":
+        new_secret: str = _new_project_secret("ghwh")
+        upsert_connector_config(
+            project_id,
+            "github",
+            {
+                "webhook_secret": new_secret,
+                "rotated_by": "admin_rotation",
+                "rotated_at": datetime.now().isoformat(),
+            },
+        )
+        _audit(
+            project_id,
+            "credential_rotated",
+            "admin",
+            "admin_api_key",
+            {"credential_type": credential_type, "revoked_previous": True},
+        )
+        return {
+            "project_id": project_id,
+            "credential_type": credential_type,
+            "credentials": {"github_webhook_secret": new_secret},
+            "revoked_previous": True,
+            "warning": "Credential returned once. Update GitHub webhook secret immediately.",
+        }
+    if credential_type == "supabase_webhook_secret":
+        new_secret = _new_project_secret("sbwh")
+        upsert_connector_config(
+            project_id,
+            "supabase",
+            {
+                "webhook_secret": new_secret,
+                "rotated_by": "admin_rotation",
+                "rotated_at": datetime.now().isoformat(),
+            },
+        )
+        _audit(
+            project_id,
+            "credential_rotated",
+            "admin",
+            "admin_api_key",
+            {"credential_type": credential_type, "revoked_previous": True},
+        )
+        return {
+            "project_id": project_id,
+            "credential_type": credential_type,
+            "credentials": {"supabase_webhook_secret": new_secret},
+            "revoked_previous": True,
+            "warning": "Credential returned once. Update Supabase webhook secret immediately.",
+        }
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "credential_type must be one of server_api_key, browser_public_key, "
+            "github_webhook_secret, supabase_webhook_secret"
+        ),
+    )
 
 
 @app.post("/api/v1/incidents")
@@ -493,7 +972,7 @@ async def create_gateway_incident(
     service: str = str(body.get("service", "")).strip()
     if not service:
         raise HTTPException(status_code=400, detail="service is required")
-    return create_incident(
+    created: Dict[str, Any] = create_incident(
         project_id=project_id,
         service=service,
         environment=str(body.get("environment") or "production"),
@@ -501,6 +980,19 @@ async def create_gateway_incident(
         severity=str(body.get("severity") or "unknown"),
         timestamp=str(body.get("timestamp") or datetime.now().isoformat()),
     )
+    _audit(
+        project_id,
+        "incident_created",
+        "server_api_key",
+        "project",
+        {
+            "incident_id": created["incident_id"],
+            "job_id": created["job_id"],
+            "service": service,
+            "severity": str(body.get("severity") or "unknown"),
+        },
+    )
+    return created
 
 
 @app.post("/api/v1/service-config")
@@ -526,6 +1018,17 @@ async def upsert_gateway_service_config(
         revenue_per_user_per_minute=revenue_rate,
         impact_metric=str(body.get("impact_metric") or "error_rate"),
     )
+    _audit(
+        project_id,
+        "service_business_config_updated",
+        "server_api_key",
+        "project",
+        {
+            "service": service,
+            "total_users": total_users,
+            "impact_metric": str(body.get("impact_metric") or "error_rate"),
+        },
+    )
     return {"project_id": project_id, "service": service, "status": "configured"}
 
 
@@ -533,6 +1036,23 @@ async def upsert_gateway_service_config(
 async def get_connector_setup(authorization: str = Header(default="")) -> Dict[str, Any]:
     project_id: str = _require_project(authorization)
     return _connector_setup_payload(project_id)
+
+
+@app.get("/api/v1/readiness")
+async def get_gateway_readiness(authorization: str = Header(default="")) -> Dict[str, Any]:
+    project_id: str = _require_project(authorization)
+    return _readiness_payload(project_id)
+
+
+@app.get("/api/v1/audit")
+async def get_gateway_audit(
+    authorization: str = Header(default=""), limit: int = 100
+) -> Dict[str, Any]:
+    project_id: str = _require_project(authorization)
+    return {
+        "project_id": project_id,
+        "events": list_audit_events(project_id, limit),
+    }
 
 
 @app.get("/api/v1/incidents/{incident_id}")
@@ -561,6 +1081,18 @@ async def ask_gateway_incident(
     result: Dict[str, Any] = await answer_question(_with_gateway_context(record), question)
     result["evidence_confidence"] = "high" if result.get("citations") else "insufficient"
     result["missing_evidence"] = [] if result.get("citations") else ["cited evidence"]
+    _audit(
+        project_id,
+        "incident_ask_answered",
+        "server_api_key",
+        "project",
+        {
+            "incident_id": incident_id,
+            "question_length": len(question),
+            "citations": len(result.get("citations") or []),
+            "evidence_confidence": result["evidence_confidence"],
+        },
+    )
     return result
 
 
@@ -583,10 +1115,72 @@ async def github_webhook(
     body["project_id"] = project_id
     event, chunks = normalize_event(body, project_id)
     saved: Dict[str, Any] = save_evidence_event(event, chunks)
+    _audit(
+        project_id,
+        "connector_evidence_ingested",
+        "github_relay",
+        x_github_delivery or "missing_delivery_id",
+        {
+            "event_id": saved["event_id"],
+            "connector": "github",
+            "mode": "relay",
+            "github_event": x_github_event,
+            "service": event["service"],
+            "chunks_created": len(chunks),
+        },
+    )
     return {
         "event_id": saved["event_id"],
         "project_id": project_id,
         "connector": "github",
+        "chunks_created": len(chunks),
+        "status": "accepted",
+    }
+
+
+@app.post("/api/v1/connectors/github/{project_id}/webhook")
+async def github_direct_webhook(
+    project_id: str,
+    request: Request,
+    x_github_event: str = Header(default="push"),
+    x_github_delivery: str = Header(default=""),
+    x_hub_signature_256: str = Header(default=""),
+) -> Dict[str, Any]:
+    _enforce_rate_limit(f"github:{project_id}")
+    raw_body: bytes = await request.body()
+    _verify_signature_with_secret(
+        raw_body,
+        x_hub_signature_256,
+        _github_webhook_secret(project_id),
+        "GITHUB_WEBHOOK_SECRETS or GITHUB_WEBHOOK_SECRET",
+    )
+    _record_connector_delivery(project_id, "github", x_github_delivery)
+    payload: Any = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    body: Dict[str, Any] = github_event_to_body(payload, x_github_event)
+    body["project_id"] = project_id
+    event, chunks = normalize_event(body, project_id)
+    saved: Dict[str, Any] = save_evidence_event(event, chunks)
+    _audit(
+        project_id,
+        "connector_evidence_ingested",
+        "github_direct",
+        x_github_delivery or "missing_delivery_id",
+        {
+            "event_id": saved["event_id"],
+            "connector": "github",
+            "mode": "direct",
+            "github_event": x_github_event,
+            "service": event["service"],
+            "chunks_created": len(chunks),
+        },
+    )
+    return {
+        "event_id": saved["event_id"],
+        "project_id": project_id,
+        "connector": "github",
+        "mode": "direct",
         "chunks_created": len(chunks),
         "status": "accepted",
     }
@@ -613,6 +1207,19 @@ async def supabase_webhook(
     body["project_id"] = project_id
     event, chunks = normalize_event(body, project_id)
     saved: Dict[str, Any] = save_evidence_event(event, chunks)
+    _audit(
+        project_id,
+        "connector_evidence_ingested",
+        "supabase_relay",
+        x_supabase_delivery or x_request_id or "missing_delivery_id",
+        {
+            "event_id": saved["event_id"],
+            "connector": "supabase",
+            "mode": "relay",
+            "service": event["service"],
+            "chunks_created": len(chunks),
+        },
+    )
     return {
         "event_id": saved["event_id"],
         "project_id": project_id,
@@ -622,8 +1229,58 @@ async def supabase_webhook(
     }
 
 
+@app.post("/api/v1/connectors/supabase/{project_id}/webhook")
+async def supabase_direct_webhook(
+    project_id: str,
+    request: Request,
+    x_supabase_signature: str = Header(default=""),
+    x_supabase_delivery: str = Header(default=""),
+    x_request_id: str = Header(default=""),
+) -> Dict[str, Any]:
+    _enforce_rate_limit(f"supabase:{project_id}")
+    raw_body: bytes = await request.body()
+    _verify_signature_with_secret(
+        raw_body,
+        x_supabase_signature,
+        _supabase_webhook_secret(project_id),
+        "SUPABASE_WEBHOOK_SECRETS or SUPABASE_WEBHOOK_SECRET",
+    )
+    _record_connector_delivery(
+        project_id, "supabase", x_supabase_delivery or x_request_id
+    )
+    payload: Any = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    body: Dict[str, Any] = supabase_event_to_body(payload)
+    body["project_id"] = project_id
+    event, chunks = normalize_event(body, project_id)
+    saved: Dict[str, Any] = save_evidence_event(event, chunks)
+    _audit(
+        project_id,
+        "connector_evidence_ingested",
+        "supabase_direct",
+        x_supabase_delivery or x_request_id or "missing_delivery_id",
+        {
+            "event_id": saved["event_id"],
+            "connector": "supabase",
+            "mode": "direct",
+            "service": event["service"],
+            "chunks_created": len(chunks),
+        },
+    )
+    return {
+        "event_id": saved["event_id"],
+        "project_id": project_id,
+        "connector": "supabase",
+        "mode": "direct",
+        "chunks_created": len(chunks),
+        "status": "accepted",
+    }
+
+
 @app.post("/api/incidents/trigger")
 async def trigger_incident(incident_data: Dict[str, Any]) -> Dict[str, Any]:
+    _require_demo_mode()
     incident_id: str = str(uuid.uuid4())
     timestamp: str = incident_data.get("timestamp", datetime.now().isoformat())
 
@@ -654,11 +1311,13 @@ async def trigger_incident(incident_data: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/api/incidents")
 async def list_incidents() -> List[Dict[str, Any]]:
+    _require_demo_mode()
     return [incident_store[iid] for iid in incident_order if iid in incident_store]
 
 
 @app.get("/api/incidents/{incident_id}")
 async def get_incident(incident_id: str) -> Dict[str, Any]:
+    _require_demo_mode()
     if incident_id not in incident_store:
         raise HTTPException(status_code=404, detail="Incident not found")
 
@@ -668,6 +1327,7 @@ async def get_incident(incident_id: str) -> Dict[str, Any]:
 @app.post("/api/incidents/{incident_id}/ask")
 async def ask_incident(incident_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
     """Natural-language Q&A grounded in one incident's investigation data."""
+    _require_demo_mode()
     if incident_id not in incident_store:
         raise HTTPException(status_code=404, detail="Incident not found")
     question: str = str(body.get("question", "")).strip()
@@ -682,6 +1342,7 @@ async def decide_remediation(
 ) -> Dict[str, Any]:
     """Human-in-the-loop gate: no recovery action is considered actionable
     until a human explicitly approves it."""
+    _require_demo_mode()
     if incident_id not in incident_store:
         raise HTTPException(status_code=404, detail="Incident not found")
     decision: str = str(body.get("decision", ""))
@@ -789,6 +1450,7 @@ def _postmortem_markdown(record: Dict[str, Any]) -> str:
 
 @app.get("/api/incidents/{incident_id}/postmortem")
 async def download_postmortem(incident_id: str) -> Response:
+    _require_demo_mode()
     if incident_id not in incident_store:
         raise HTTPException(status_code=404, detail="Incident not found")
     markdown: str = _postmortem_markdown(incident_store[incident_id])

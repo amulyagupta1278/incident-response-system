@@ -130,11 +130,41 @@ def test_connector_setup_requires_server_key_and_is_project_scoped(
     assert project_b.status_code == 200
     assert payload["project_id"] == "project-a"
     assert project_b.json()["project_id"] == "project-b"
-    assert payload["endpoints"]["github_webhook"] == (
-        "https://ops.example/api/v1/connectors/github/webhook"
+    assert payload["endpoints"]["github_direct_webhook"] == (
+        "https://ops.example/api/v1/connectors/github/project-a/webhook"
+    )
+    assert payload["github_webhook"]["url"] == (
+        "https://ops.example/api/v1/connectors/github/project-a/webhook"
     )
     assert 'data-project-id="project-a"' in payload["browser_snippet"]
     assert "do-not-leak" not in json.dumps(payload)
+
+
+def test_legacy_demo_routes_are_disabled_in_production(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEMO_MODE", "false")
+    client = make_client(monkeypatch, tmp_path)
+
+    response = client.post(
+        "/api/incidents/trigger",
+        json={"service": "api", "alert_description": "demo should be closed"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_legacy_demo_routes_work_in_development_default(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.delenv("DEMO_MODE", raising=False)
+    client = make_client(monkeypatch, tmp_path)
+
+    response = client.get("/api/incidents")
+
+    assert response.status_code == 200
 
 
 def test_browser_key_is_write_only(monkeypatch: Any, tmp_path: Path) -> None:
@@ -282,6 +312,67 @@ def test_github_webhook_requires_valid_signature_when_enabled(
     assert accepted.status_code == 200
 
 
+def test_direct_github_webhook_accepts_valid_signature_without_bearer(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRETS", "project-a:github-secret")
+    client = make_client(monkeypatch, tmp_path)
+    payload = {
+        "repository": {"name": "web"},
+        "after": "abc123",
+        "commits": [{"id": "abc123", "message": "change checkout flow"}],
+    }
+    body, signature = signed_body(payload, "github-secret")
+
+    response = client.post(
+        "/api/v1/connectors/github/project-a/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-GitHub-Delivery": "direct-delivery-1",
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["project_id"] == "project-a"
+    assert response.json()["mode"] == "direct"
+
+
+def test_direct_github_webhook_rejects_missing_or_invalid_signature(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRETS", "project-a:github-secret")
+    client = make_client(monkeypatch, tmp_path)
+    payload = {
+        "repository": {"name": "web"},
+        "after": "abc123",
+        "commits": [{"id": "abc123", "message": "change checkout flow"}],
+    }
+    body, _ = signed_body(payload, "github-secret")
+
+    missing = client.post(
+        "/api/v1/connectors/github/project-a/webhook",
+        headers={"X-GitHub-Event": "push", "Content-Type": "application/json"},
+        content=body,
+    )
+    invalid = client.post(
+        "/api/v1/connectors/github/project-a/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-Hub-Signature-256": "sha256=bad",
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+
+
 def test_duplicate_webhook_delivery_is_rejected(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -304,6 +395,32 @@ def test_duplicate_webhook_delivery_is_rejected(
 
     first = client.post("/api/v1/connectors/github/webhook", headers=headers, content=body)
     duplicate = client.post("/api/v1/connectors/github/webhook", headers=headers, content=body)
+
+    assert first.status_code == 200
+    assert duplicate.status_code == 409
+
+
+def test_direct_github_duplicate_delivery_is_rejected(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRETS", "project-a:github-secret")
+    client = make_client(monkeypatch, tmp_path)
+    payload = {
+        "repository": {"name": "web"},
+        "after": "abc123",
+        "commits": [{"id": "abc123", "message": "change checkout flow"}],
+    }
+    body, signature = signed_body(payload, "github-secret")
+    headers = {
+        "X-GitHub-Event": "push",
+        "X-GitHub-Delivery": "direct-delivery-dup",
+        "X-Hub-Signature-256": signature,
+        "Content-Type": "application/json",
+    }
+
+    first = client.post("/api/v1/connectors/github/project-a/webhook", headers=headers, content=body)
+    duplicate = client.post("/api/v1/connectors/github/project-a/webhook", headers=headers, content=body)
 
     assert first.status_code == 200
     assert duplicate.status_code == 409

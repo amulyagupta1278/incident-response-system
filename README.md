@@ -125,9 +125,11 @@ PUBLIC_BASE_URL=https://your-railway-domain.up.railway.app
 INGEST_API_KEYS=demo-project:<replace-with-strong-key>
 BROWSER_PUBLIC_KEYS=demo-project:<replace-with-public-browser-key>
 APP_ENV=production
+DEMO_MODE=false
 GATEWAY_WORKER_ENABLED=true
 RAW_PAYLOAD_RETENTION_DAYS=0
 CONNECTOR_SIGNATURES_REQUIRED=true
+GITHUB_WEBHOOK_SECRETS=demo-project:<github-webhook-secret>
 GITHUB_WEBHOOK_SECRET=<github-webhook-secret>
 SUPABASE_WEBHOOK_SECRET=<supabase-webhook-secret>
 ```
@@ -141,6 +143,7 @@ Security model:
 - GitHub and Supabase webhooks should send HMAC SHA-256 signatures in production.
 - Connector delivery IDs are stored to reject replayed webhook deliveries.
 - All incident reads and Ask calls are project-scoped.
+- Legacy demo routes `/api/incidents/*` are disabled in production unless `DEMO_MODE=true`.
 
 ## Universal Ingest API
 
@@ -180,7 +183,8 @@ Useful production endpoints:
 - `POST /api/v1/incidents` - queue incident analysis
 - `GET /api/v1/incidents/{incident_id}` - persistent incident state
 - `POST /api/v1/incidents/{incident_id}/ask` - cited RAG answer
-- `POST /api/v1/connectors/github/webhook` - GitHub webhook evidence
+- `POST /api/v1/connectors/github/{project_id}/webhook` - direct GitHub webhook evidence
+- `POST /api/v1/connectors/github/webhook` - bearer-auth GitHub relay evidence
 - `POST /api/v1/connectors/supabase/webhook` - Supabase webhook evidence
 
 Connector setup helper:
@@ -191,6 +195,8 @@ curl -s "$PUBLIC_BASE_URL/api/v1/connectors/setup" \
 ```
 
 This returns project-scoped endpoint URLs, browser snippet, webhook header contract, and production security checklist. It never returns stored secret values.
+
+For GitHub UI, set Payload URL to `/api/v1/connectors/github/{project_id}/webhook`, content type to `application/json`, Secret to the matching project secret from `GITHUB_WEBHOOK_SECRETS`, and select push/pull request/deployment/release events as needed.
 
 ## Hackathon Acceptance Smoke
 

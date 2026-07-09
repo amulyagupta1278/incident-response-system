@@ -263,6 +263,16 @@ def _env_enabled(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
 
 
+def _demo_mode_enabled() -> bool:
+    default: str = "false" if os.getenv("APP_ENV", "development").lower() == "production" else "true"
+    return _env_enabled("DEMO_MODE", default)
+
+
+def _require_demo_mode() -> None:
+    if not _demo_mode_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+
+
 def _enforce_rate_limit(project_id: str) -> None:
     limit: int = int(os.getenv("INGEST_RATE_LIMIT_PER_MINUTE", "120"))
     now: float = time.time()
@@ -308,13 +318,14 @@ def _webhook_signatures_required() -> bool:
     return os.getenv("APP_ENV", "development").lower() == "production"
 
 
-def _verify_webhook_signature(body: bytes, signature: str, secret_env: str) -> None:
-    secret: str = os.getenv(secret_env, "")
+def _verify_signature_with_secret(
+    body: bytes, signature: str, secret: str, secret_label: str
+) -> None:
     if not secret:
         if _webhook_signatures_required():
             raise HTTPException(
                 status_code=401,
-                detail=f"{secret_env} must be configured before accepting connector webhooks",
+                detail=f"{secret_label} must be configured before accepting connector webhooks",
             )
         return
     if not signature:
@@ -322,6 +333,29 @@ def _verify_webhook_signature(body: bytes, signature: str, secret_env: str) -> N
     expected: str = "sha256=" + hmac.new(secret.encode(), body, "sha256").hexdigest()
     if not hmac.compare_digest(expected, signature):
         raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+
+def _verify_webhook_signature(body: bytes, signature: str, secret_env: str) -> None:
+    _verify_signature_with_secret(body, signature, os.getenv(secret_env, ""), secret_env)
+
+
+def _project_secret(env_name: str, project_id: str) -> str:
+    entries: list[str] = [
+        item.strip() for item in os.getenv(env_name, "").split(",") if item.strip()
+    ]
+    for entry in entries:
+        if ":" not in entry:
+            continue
+        entry_project, secret = entry.split(":", 1)
+        if entry_project.strip() == project_id:
+            return secret.strip()
+    return ""
+
+
+def _github_webhook_secret(project_id: str) -> str:
+    return _project_secret("GITHUB_WEBHOOK_SECRETS", project_id) or os.getenv(
+        "GITHUB_WEBHOOK_SECRET", ""
+    )
 
 
 def _record_connector_delivery(
@@ -350,6 +384,7 @@ def _connector_setup_payload(project_id: str) -> Dict[str, Any]:
             "universal_ingest": f"{base_url}/api/v1/events",
             "browser_ingest": f"{base_url}/api/v1/browser/events",
             "github_webhook": f"{base_url}/api/v1/connectors/github/webhook",
+            "github_direct_webhook": f"{base_url}/api/v1/connectors/github/{project_id}/webhook",
             "supabase_webhook": f"{base_url}/api/v1/connectors/supabase/webhook",
             "create_incident": f"{base_url}/api/v1/incidents",
             "ask_incident": f"{base_url}/api/v1/incidents/{{incident_id}}/ask",
@@ -363,11 +398,16 @@ def _connector_setup_payload(project_id: str) -> Dict[str, Any]:
             'data-release-sha="<git-sha>"></script>'
         ),
         "github_webhook": {
-            "url": f"{base_url}/api/v1/connectors/github/webhook",
+            "url": f"{base_url}/api/v1/connectors/github/{project_id}/webhook",
             "content_type": "application/json",
-            "secret_env": "GITHUB_WEBHOOK_SECRET",
+            "secret_env": "GITHUB_WEBHOOK_SECRETS or GITHUB_WEBHOOK_SECRET",
+            "github_ui_setup": {
+                "payload_url": f"{base_url}/api/v1/connectors/github/{project_id}/webhook",
+                "content_type": "application/json",
+                "secret": "project GitHub webhook secret",
+                "events": ["push", "pull_request", "deployment", "release"],
+            },
             "required_headers": {
-                "Authorization": "Bearer <project-api-key>",
                 "X-GitHub-Event": "<github-event>",
                 "X-GitHub-Delivery": "<delivery-id>",
                 "X-Hub-Signature-256": "sha256=<hmac>",
@@ -592,6 +632,40 @@ async def github_webhook(
     }
 
 
+@app.post("/api/v1/connectors/github/{project_id}/webhook")
+async def github_direct_webhook(
+    project_id: str,
+    request: Request,
+    x_github_event: str = Header(default="push"),
+    x_github_delivery: str = Header(default=""),
+    x_hub_signature_256: str = Header(default=""),
+) -> Dict[str, Any]:
+    _enforce_rate_limit(f"github:{project_id}")
+    raw_body: bytes = await request.body()
+    _verify_signature_with_secret(
+        raw_body,
+        x_hub_signature_256,
+        _github_webhook_secret(project_id),
+        "GITHUB_WEBHOOK_SECRETS or GITHUB_WEBHOOK_SECRET",
+    )
+    _record_connector_delivery(project_id, "github", x_github_delivery)
+    payload: Any = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    body: Dict[str, Any] = github_event_to_body(payload, x_github_event)
+    body["project_id"] = project_id
+    event, chunks = normalize_event(body, project_id)
+    saved: Dict[str, Any] = save_evidence_event(event, chunks)
+    return {
+        "event_id": saved["event_id"],
+        "project_id": project_id,
+        "connector": "github",
+        "mode": "direct",
+        "chunks_created": len(chunks),
+        "status": "accepted",
+    }
+
+
 @app.post("/api/v1/connectors/supabase/webhook")
 async def supabase_webhook(
     request: Request,
@@ -624,6 +698,7 @@ async def supabase_webhook(
 
 @app.post("/api/incidents/trigger")
 async def trigger_incident(incident_data: Dict[str, Any]) -> Dict[str, Any]:
+    _require_demo_mode()
     incident_id: str = str(uuid.uuid4())
     timestamp: str = incident_data.get("timestamp", datetime.now().isoformat())
 
@@ -654,11 +729,13 @@ async def trigger_incident(incident_data: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/api/incidents")
 async def list_incidents() -> List[Dict[str, Any]]:
+    _require_demo_mode()
     return [incident_store[iid] for iid in incident_order if iid in incident_store]
 
 
 @app.get("/api/incidents/{incident_id}")
 async def get_incident(incident_id: str) -> Dict[str, Any]:
+    _require_demo_mode()
     if incident_id not in incident_store:
         raise HTTPException(status_code=404, detail="Incident not found")
 
@@ -668,6 +745,7 @@ async def get_incident(incident_id: str) -> Dict[str, Any]:
 @app.post("/api/incidents/{incident_id}/ask")
 async def ask_incident(incident_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
     """Natural-language Q&A grounded in one incident's investigation data."""
+    _require_demo_mode()
     if incident_id not in incident_store:
         raise HTTPException(status_code=404, detail="Incident not found")
     question: str = str(body.get("question", "")).strip()
@@ -682,6 +760,7 @@ async def decide_remediation(
 ) -> Dict[str, Any]:
     """Human-in-the-loop gate: no recovery action is considered actionable
     until a human explicitly approves it."""
+    _require_demo_mode()
     if incident_id not in incident_store:
         raise HTTPException(status_code=404, detail="Incident not found")
     decision: str = str(body.get("decision", ""))
@@ -789,6 +868,7 @@ def _postmortem_markdown(record: Dict[str, Any]) -> str:
 
 @app.get("/api/incidents/{incident_id}/postmortem")
 async def download_postmortem(incident_id: str) -> Response:
+    _require_demo_mode()
     if incident_id not in incident_store:
         raise HTTPException(status_code=404, detail="Incident not found")
     markdown: str = _postmortem_markdown(incident_store[incident_id])

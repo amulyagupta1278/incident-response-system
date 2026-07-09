@@ -20,6 +20,8 @@ def _set_demo_env(db_path: str) -> None:
     os.environ["APP_ENV"] = "production"
     os.environ["GATEWAY_WORKER_ENABLED"] = "false"
     os.environ["CONNECTOR_SIGNATURES_REQUIRED"] = "true"
+    os.environ["DEMO_MODE"] = "false"
+    os.environ["GITHUB_WEBHOOK_SECRETS"] = "hackathon-project:demo-github-secret"
     os.environ["GITHUB_WEBHOOK_SECRET"] = "demo-github-secret"
     os.environ["SUPABASE_WEBHOOK_SECRET"] = "demo-supabase-secret"
     os.environ["INGEST_API_KEYS"] = "hackathon-project:hackathon-server-key"
@@ -97,19 +99,18 @@ def main() -> None:
         }
         body, signature = _signed_body(github_payload, "demo-github-secret")
         github_headers = {
-            **_auth("hackathon-server-key"),
             "Content-Type": "application/json",
             "X-GitHub-Event": "push",
             "X-GitHub-Delivery": "delivery-demo-1",
             "X-Hub-Signature-256": signature,
         }
         github = client.post(
-            "/api/v1/connectors/github/webhook",
+            "/api/v1/connectors/github/hackathon-project/webhook",
             headers=github_headers,
             content=body,
         )
         replay = client.post(
-            "/api/v1/connectors/github/webhook",
+            "/api/v1/connectors/github/hackathon-project/webhook",
             headers=github_headers,
             content=body,
         )

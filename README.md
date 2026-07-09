@@ -2,6 +2,8 @@
 
 Autonomous Multi-Agent Incident Response System
 
+> See **[SUBMISSION.md](SUBMISSION.md)** for a project overview and key differentiators, **[ARCHITECTURE.md](ARCHITECTURE.md)** for the technical deep-dive and diagrams, and **[WORKFLOW.md](WORKFLOW.md)** for a step-by-step system walkthrough.
+
 ## Problem
 
 Enterprise incident response is slow and manual. Engineers spend hours sifting through logs, metrics, and deployment data to determine what went wrong and why.

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List
@@ -12,16 +13,31 @@ load_dotenv()
 
 from agents import IncidentState
 from agents.agentic_system import get_compiled_graph
-from agents.llm import get_model, get_provider
+from agents.llm import get_model, get_provider, get_timeout_seconds, llm_strict_mode
 from agents.memory import record_incident
 from agents.notify import post_war_room, war_room_configured
 from agents.qa import answer_question
 
 app: FastAPI = FastAPI(title="AI Operations Command Center")
 
+
+def _allowed_origins() -> List[str]:
+    raw: str = os.getenv("ALLOWED_ORIGINS", "")
+    if raw:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:8011",
+        "http://127.0.0.1:8011",
+        "http://localhost:8012",
+        "http://127.0.0.1:8012",
+    ]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,6 +55,7 @@ def _serialize_state(values: Dict[str, Any]) -> Dict[str, Any]:
         "alert_description": values.get("alert_description"),
         "service": values.get("service"),
         "severity": values.get("severity"),
+        "log_source_path": values.get("log_source_path", ""),
         "analysis_iterations": values.get("analysis_iterations", 0),
         "rca_confidence": values.get("rca_confidence", 0.0),
         "current_status": values.get("current_status", "initial"),
@@ -124,6 +141,8 @@ async def get_config() -> Dict[str, Any]:
     return {
         "llm_provider": provider or "heuristic",
         "llm_model": get_model(),
+        "llm_strict": llm_strict_mode(),
+        "llm_timeout_seconds": get_timeout_seconds(),
         "agentic": True,
         "war_room": war_room_configured(),
     }
@@ -145,6 +164,7 @@ async def trigger_incident(incident_data: Dict[str, Any]) -> Dict[str, Any]:
         alert_description=incident_data.get("alert_description", ""),
         service=incident_data.get("service", "unknown"),
         severity=incident_data.get("severity", "unknown"),
+        log_source_path=incident_data.get("logs_path", ""),
     )
 
     record: Dict[str, Any] = _serialize_state(dict(vars(state)))
@@ -184,8 +204,7 @@ async def ask_incident(incident_id: str, body: Dict[str, Any]) -> Dict[str, Any]
     question: str = str(body.get("question", "")).strip()
     if not question:
         raise HTTPException(status_code=400, detail="question is required")
-    answer, source = await answer_question(incident_store[incident_id], question)
-    return {"answer": answer, "source": source}
+    return await answer_question(incident_store[incident_id], question)
 
 
 @app.post("/api/incidents/{incident_id}/remediation/{step_index}/decision")
@@ -250,6 +269,7 @@ def _postmortem_markdown(record: Dict[str, Any]) -> str:
     ]
     if impact:
         lines += [
+            f"- Verification: {impact.get('verification_status', 'unknown')} ({impact.get('confidence_level', 'unknown')} confidence)",
             (
                 f"- Justification: {impact.get('affected_users', 0):,} affected users x "
                 f"${impact.get('revenue_per_user_per_minute', 0):.2f}/user/min"
@@ -263,6 +283,8 @@ def _postmortem_markdown(record: Dict[str, Any]) -> str:
                 f"affected users capped at {impact.get('limits', {}).get('affected_users_ceiling', 0):,}"
             ),
         ]
+        if impact.get("data_gaps"):
+            lines += ["- Data gaps: " + "; ".join(str(gap) for gap in impact["data_gaps"])]
     if log_cache:
         lines += [
             "",

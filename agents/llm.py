@@ -1,14 +1,18 @@
 """Unified async LLM layer powered by OpenAI (ChatGPT / GPT-4o).
 
-When no OPENAI_API_KEY is configured every caller falls back to its
-heuristic path, so the system stays fully functional offline.
+When no OPENAI_API_KEY is configured callers may fall back to deterministic
+heuristics. When a key exists, strict mode defaults on so LLM failures are
+visible instead of silently producing fallback analysis.
 """
 
+import asyncio
 import json
 import os
 from typing import Any, Dict, Optional
 
 OPENAI_DEFAULT_MODEL: str = "gpt-4o"
+OPENAI_DEFAULT_EMBEDDING_MODEL: str = "text-embedding-3-small"
+OPENAI_DEFAULT_TIMEOUT_SECONDS: float = 20.0
 
 
 def get_provider() -> Optional[str]:
@@ -21,10 +25,29 @@ def llm_available() -> bool:
     return get_provider() is not None
 
 
+def llm_strict_mode() -> bool:
+    default: str = "true" if llm_available() else "false"
+    return os.getenv("LLM_STRICT_MODE", default).lower() in {"1", "true", "yes", "on"}
+
+
 def get_model() -> str:
     if get_provider() == "openai":
         return os.getenv("OPENAI_MODEL", OPENAI_DEFAULT_MODEL)
     return "heuristic"
+
+
+def get_embedding_model() -> str:
+    if get_provider() == "openai":
+        return os.getenv("OPENAI_EMBEDDING_MODEL", OPENAI_DEFAULT_EMBEDDING_MODEL)
+    return "heuristic"
+
+
+def get_timeout_seconds() -> float:
+    value: str = os.getenv("OPENAI_TIMEOUT_SECONDS", str(OPENAI_DEFAULT_TIMEOUT_SECONDS))
+    try:
+        return max(1.0, float(value))
+    except ValueError:
+        return OPENAI_DEFAULT_TIMEOUT_SECONDS
 
 
 async def complete_json(
@@ -36,13 +59,25 @@ async def complete_json(
     expected to catch and fall back to their heuristic path.
     """
     if get_provider() == "openai":
-        return await _openai_json(system, prompt, schema, schema_name)
+        return await asyncio.wait_for(
+            _openai_json(system, prompt, schema, schema_name),
+            timeout=get_timeout_seconds(),
+        )
     raise RuntimeError("No LLM provider configured (set OPENAI_API_KEY)")
 
 
 async def complete_text(system: str, prompt: str) -> str:
     if get_provider() == "openai":
-        return await _openai_text(system, prompt)
+        return await asyncio.wait_for(
+            _openai_text(system, prompt),
+            timeout=get_timeout_seconds(),
+        )
+    raise RuntimeError("No LLM provider configured (set OPENAI_API_KEY)")
+
+
+async def embed_texts(texts: list[str]) -> list[list[float]]:
+    if get_provider() == "openai":
+        return await asyncio.wait_for(_openai_embeddings(texts), timeout=get_timeout_seconds())
     raise RuntimeError("No LLM provider configured (set OPENAI_API_KEY)")
 
 
@@ -51,7 +86,7 @@ async def _openai_json(
 ) -> Dict[str, Any]:
     from openai import AsyncOpenAI
 
-    client: AsyncOpenAI = AsyncOpenAI()
+    client: AsyncOpenAI = AsyncOpenAI(timeout=get_timeout_seconds(), max_retries=0)
     response: Any = await client.chat.completions.create(
         model=os.getenv("OPENAI_MODEL", OPENAI_DEFAULT_MODEL),
         messages=[
@@ -69,7 +104,7 @@ async def _openai_json(
 async def _openai_text(system: str, prompt: str) -> str:
     from openai import AsyncOpenAI
 
-    client: AsyncOpenAI = AsyncOpenAI()
+    client: AsyncOpenAI = AsyncOpenAI(timeout=get_timeout_seconds(), max_retries=0)
     response: Any = await client.chat.completions.create(
         model=os.getenv("OPENAI_MODEL", OPENAI_DEFAULT_MODEL),
         messages=[
@@ -78,3 +113,14 @@ async def _openai_text(system: str, prompt: str) -> str:
         ],
     )
     return response.choices[0].message.content or ""
+
+
+async def _openai_embeddings(texts: list[str]) -> list[list[float]]:
+    from openai import AsyncOpenAI
+
+    client: AsyncOpenAI = AsyncOpenAI(timeout=get_timeout_seconds(), max_retries=0)
+    response: Any = await client.embeddings.create(
+        model=get_embedding_model(),
+        input=texts,
+    )
+    return [item.embedding for item in response.data]

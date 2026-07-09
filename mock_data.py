@@ -1,9 +1,14 @@
 import json
 import os
 from typing import Any, List, Dict
+from agents.log_ingestion import load_log_file
 
 
-def load_logs(service: str, timestamp: str) -> List[Dict[str, Any]]:
+def load_logs(service: str, timestamp: str, source_path: str = "") -> List[Dict[str, Any]]:
+    live_path: str = source_path or os.getenv("LIVE_LOGS_PATH", "") or _find_live_log_path(service)
+    if live_path:
+        return load_log_file(live_path, service)
+
     scenario_dir: str = _find_scenario_dir(service)
     if not scenario_dir:
         return []
@@ -74,4 +79,15 @@ def _find_scenario_dir(service: str) -> str:
     if os.path.isdir(scenario_path):
         return scenario_path
 
+    return ""
+
+
+def _find_live_log_path(service: str) -> str:
+    base_dir: str = os.path.dirname(os.path.abspath(__file__))
+    live_dir: str = os.path.join(base_dir, "data", "live_logs")
+    safe_service: str = service.replace("/", "_").replace(" ", "_")
+    for ext in ("json", "jsonl", "ndjson", "log", "txt"):
+        candidate: str = os.path.join(live_dir, f"{safe_service}.{ext}")
+        if os.path.exists(candidate):
+            return candidate
     return ""

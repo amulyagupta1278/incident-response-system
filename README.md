@@ -57,6 +57,54 @@ Then open http://localhost:8000 in a browser.
 3. View incident card with root cause confidence, affected users, revenue impact
 4. Click "View Full Details" to see engineering summary, evidence, and recovery recommendations
 
+## Real Logs
+
+The app now prefers real logs before demo scenarios. Supported formats:
+
+- `.json` array, or object with `logs`, `records`, `events`, or `data`
+- `.jsonl` / `.ndjson`
+- plain `.log` / `.txt` project logs
+- common Apache-style access logs; HTTP 5xx lines become `ERROR`
+
+Use one of these paths:
+
+```bash
+# Per incident
+curl -s -X POST http://127.0.0.1:8011/api/incidents/trigger \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2026-07-07T14:32:15Z",
+    "service": "my-service",
+    "alert_description": "Live log analysis",
+    "severity": "critical",
+    "logs_path": "data/live_logs/my-service.log"
+  }'
+
+# Or global source for every trigger
+LIVE_LOGS_PATH=data/live_logs/my-service.log python -m uvicorn app:app --host 127.0.0.1 --port 8011
+```
+
+Auto-discovery also works when a file exists at:
+
+```text
+data/live_logs/<service>.json
+data/live_logs/<service>.jsonl
+data/live_logs/<service>.ndjson
+data/live_logs/<service>.log
+data/live_logs/<service>.txt
+```
+
+Kaggle workflow:
+
+```bash
+# Requires Kaggle credentials at ~/.kaggle/kaggle.json
+mkdir -p data/kaggle data/live_logs
+kaggle datasets download -d <owner>/<dataset> -p data/kaggle --unzip
+cp data/kaggle/<log-file>.log data/live_logs/my-service.log
+```
+
+Large Kaggle/project logs should stay out of git. `data/live_logs/` and `data/kaggle/` are ignored.
+
 ## Project Structure
 
 ```
@@ -109,23 +157,24 @@ All three scenarios pass with:
 
 ### Scenario 1: Database Connection Pool Exhaustion
 - **Root Cause**: Pool size reduced from 50 to 30 in recent deployment
-- **Confidence**: 85%
-- **Affected Users**: 1,400
-- **Revenue Impact**: $700/minute
+- **Confidence**: ~90%
+- **Affected Users**: 9,520
+- **Revenue Impact**: $476/minute
 - **Key Indicators**: Connection timeout errors, CPU spike 23% → 78%, error_rate 0.1% → 68%
+- **Impact Verification**: `verified_estimate` when service config and error_rate metric are present; report includes formula, bounds, sources, and data gaps.
 
 ### Scenario 2: Memory Leak
 - **Root Cause**: Code regression causing memory not to be released
 - **Confidence**: 72%
-- **Affected Users**: 5,000
-- **Revenue Impact**: $1,500/minute
+- **Affected Users**: 7,500
+- **Revenue Impact**: $225/minute
 - **Key Indicators**: GC pause times increasing, memory 500MB → 2000MB (no deployment)
 
 ### Scenario 3: Cascading Failure
 - **Root Cause**: Timeout calling downstream payment-api service
 - **Confidence**: 80%
-- **Affected Users**: 3,000
-- **Revenue Impact**: $1,200/minute
+- **Affected Users**: 25,500
+- **Revenue Impact**: $1,020/minute
 - **Key Indicators**: Timeout errors, latency spike 55ms → 8000ms, error_rate spike to 85%
 
 ## Tech Stack
@@ -146,12 +195,14 @@ All three scenarios pass with:
     "timestamp": "2026-07-07T14:32:15Z",
     "service": "payment-api",
     "alert_description": "Connection pool exhaustion",
-    "severity": "critical"
+    "severity": "critical",
+    "logs_path": "data/live_logs/payment-api.log"
   }
   ```
 
 - `GET /api/incidents` - List all incidents (newest first)
 - `GET /api/incidents/{incident_id}` - Poll live analysis state / retrieve completed analysis
+- `POST /api/incidents/{incident_id}/ask` - RAG Q&A over incident evidence. Returns `answer`, `source`, `citations`, and `retrieved_chunks`.
 - `GET /api/config` - Active LLM provider and model (`heuristic` when no key is set)
 - `GET /api/graph` - Mermaid rendering of the agent graph
 - `GET /api/health` - Health check

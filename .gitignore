@@ -82,3 +82,5 @@ yarn.lock
 *~
 .#*
 data/incident_memory.json
+data/live_logs/
+data/kaggle/

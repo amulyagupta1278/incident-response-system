@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from agents import IncidentState
-from agents.llm import complete_json, get_model, llm_available
+from agents.llm import complete_json, get_model, llm_available, llm_strict_mode
 
 ROUTER_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -90,8 +90,8 @@ def route_next_action(state: IncidentState) -> str:
 async def route_next_action_agentic(state: IncidentState) -> str:
     """LLM-powered router: reasons over the incident state and decides what
     to do next, constrained to the set of currently-valid actions. Falls
-    back to the deterministic router when no LLM is configured or the LLM
-    returns an invalid action.
+    back to the deterministic router only when no LLM is configured. If a key
+    exists and strict mode is on, LLM call failures stop the incident.
     """
     candidates: List[str] = valid_next_actions(state)
 
@@ -139,6 +139,10 @@ async def route_next_action_agentic(state: IncidentState) -> str:
         else:
             source = f"llm:{get_model()}"
     except Exception as exc:
+        if llm_strict_mode():
+            raise RuntimeError(
+                f"LLM routing failed in strict mode: {exc}"
+            ) from exc
         print(f"[router] LLM routing failed, using deterministic fallback: {exc}")
         decision = candidates[0]
         reasoning = "LLM routing failed; deterministic fallback"

@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from agents import IncidentState
-from agents.llm import complete_json, get_model, llm_available
+from agents.llm import complete_json, get_model, llm_available, llm_strict_mode
 from agents.memory import find_similar_incidents
 from agents.rca_analysis import rca_analysis
 
@@ -42,8 +42,8 @@ RCA_SCHEMA: Dict[str, Any] = {
 
 async def rca_analysis_with_llm(state: IncidentState) -> IncidentState:
     """Root cause analysis: reasons over evidence with the configured LLM
-    (OpenAI); falls back to heuristic pattern matching when no key is
-    configured or the call fails."""
+    (OpenAI); falls back to heuristic pattern matching only when no key is
+    configured, or when strict mode is disabled."""
     result: Dict[str, Any] = {}
     source: str = "heuristic_fallback"
 
@@ -80,6 +80,10 @@ async def rca_analysis_with_llm(state: IncidentState) -> IncidentState:
             )
             source = f"llm:{get_model()}"
         except Exception as exc:
+            if llm_strict_mode():
+                raise RuntimeError(
+                    f"LLM RCA failed in strict mode: {exc}"
+                ) from exc
             print(f"[rca] LLM call failed, using heuristic fallback: {exc}")
             result = {}
 

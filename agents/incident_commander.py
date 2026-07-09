@@ -7,7 +7,7 @@ from mock_data import load_logs, load_metrics, load_deployments
 def incident_commander(state: IncidentState) -> IncidentState:
     timestamp: str = state.timestamp or datetime.now().isoformat()
 
-    state.raw_logs = load_logs(state.service, timestamp)
+    state.raw_logs = load_logs(state.service, timestamp, state.log_source_path)
     state.raw_metrics = load_metrics(state.service, timestamp)
     state.deployment_changes = load_deployments(state.service, timestamp)
 
@@ -18,7 +18,8 @@ def incident_commander(state: IncidentState) -> IncidentState:
         "data_points": {
             "logs_loaded": len(state.raw_logs),
             "metrics_loaded": len(state.raw_metrics),
-            "deployments_loaded": len(state.deployment_changes)
+            "deployments_loaded": len(state.deployment_changes),
+            "log_source": state.log_source_path or "auto"
         }
     }
     state.agent_invocations.append(invocation)

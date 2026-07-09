@@ -7,7 +7,7 @@ from agents import IncidentState
 from agents.business_impact import business_impact
 from agents.executive_summary import executive_summary
 from agents.incident_commander import incident_commander
-from agents.llm import complete_json, get_model, llm_available
+from agents.llm import complete_json, get_model, llm_available, llm_strict_mode
 from agents.log_analysis import log_analysis
 from agents.metrics_analysis import metrics_analysis
 from agents.rca_agent import rca_analysis_with_llm
@@ -89,8 +89,8 @@ async def _generate_summary_node(state: IncidentState) -> Dict[str, Any]:
 
 async def _enhance_summary_with_llm(state: IncidentState) -> IncidentState:
     """Rewrite the executive summary and recovery plan with the configured
-    LLM, grounded in the analysis. Deterministic summaries remain if no LLM
-    is configured or the call fails."""
+    LLM, grounded in the analysis. Deterministic summaries remain only when no
+    LLM is configured, or when strict mode is disabled."""
     if not llm_available():
         return state
 
@@ -133,6 +133,10 @@ async def _enhance_summary_with_llm(state: IncidentState) -> IncidentState:
             }
         )
     except Exception as exc:
+        if llm_strict_mode():
+            raise RuntimeError(
+                f"LLM summary failed in strict mode: {exc}"
+            ) from exc
         print(f"[summary] LLM enhancement failed, keeping deterministic summaries: {exc}")
     return state
 

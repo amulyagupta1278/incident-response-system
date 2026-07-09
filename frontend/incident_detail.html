@@ -232,6 +232,8 @@
                             <span>${(impact.affected_users || 0).toLocaleString()} users &times; ${formatMoney(impact.revenue_per_user_per_minute)}/user/min = ${formatMoney(impact.revenue_impact_per_minute)}/minute</span>
                         </div>
                         <div class="detail-grid">
+                            <div class="detail-item"><strong>Verification:</strong> ${escapeHtml(impact.verification_status || "unknown")}</div>
+                            <div class="detail-item"><strong>Confidence:</strong> ${escapeHtml(impact.confidence_level || "unknown")}</div>
                             <div class="detail-item"><strong>Source:</strong> ${escapeHtml(impact.impact_rate_source || "")}</div>
                             <div class="detail-item"><strong>Observed Rate:</strong> ${((impact.observed_impact_rate || 0) * 100).toFixed(1)}%</div>
                             <div class="detail-item"><strong>Bounded Rate:</strong> ${((impact.bounded_impact_rate || 0) * 100).toFixed(1)}%</div>
@@ -239,6 +241,12 @@
                             <div class="detail-item"><strong>User Limit:</strong> ${(impact.limits?.affected_users_ceiling || 0).toLocaleString()}</div>
                             <div class="detail-item"><strong>Rate Limit:</strong> ${((impact.limits?.impact_rate_ceiling || 1) * 100).toFixed(0)}%</div>
                         </div>
+                        ${(impact.data_gaps || []).length > 0 ? `
+                            <div class="impact-warning">
+                                <strong>Data gaps:</strong>
+                                <ul>${impact.data_gaps.map(gap => `<li>${escapeHtml(gap)}</li>`).join("")}</ul>
+                            </div>
+                        ` : ""}
                     </div>
                 </section>
             ` : "";
@@ -419,11 +427,46 @@
 
         function sourceBadge(source) {
             if (!source) return '<span class="mini-badge mini-badge-grey">rule</span>';
+            if (source.startsWith("rag:llm")) {
+                const parts = source.split(":");
+                const model = (parts[2] || "llm").split("+")[0];
+                return `<span class="mini-badge mini-badge-rag">RAG ${escapeHtml(model)}</span>`;
+            }
             if (source.startsWith("llm")) {
                 const model = source.split(":")[1] || "llm";
                 return `<span class="mini-badge">${escapeHtml(model)}</span>`;
             }
             return `<span class="mini-badge mini-badge-grey">${escapeHtml(source)}</span>`;
+        }
+
+        function ragEvidenceHtml(data) {
+            const citations = data.citations || [];
+            const retrieved = data.retrieved_chunks || [];
+            if (!citations.length && !retrieved.length) return "";
+
+            const citationChips = citations.length ? `
+                <div class="rag-citations">
+                    ${citations.map(c => `
+                        <span class="rag-citation">${escapeHtml(c.chunk_id)} ${escapeHtml(c.label)}</span>
+                    `).join("")}
+                </div>
+            ` : "";
+
+            const evidenceList = retrieved.length ? `
+                <details class="rag-evidence">
+                    <summary>Retrieved evidence (${retrieved.length})</summary>
+                    <ul>
+                        ${retrieved.map(chunk => `
+                            <li>
+                                <strong>${escapeHtml(chunk.chunk_id)} ${escapeHtml(chunk.label)}</strong>
+                                <span>${escapeHtml(chunk.source_type)}</span>
+                            </li>
+                        `).join("")}
+                    </ul>
+                </details>
+            ` : "";
+
+            return `${citationChips}${evidenceList}`;
         }
 
         async function askIncident() {
@@ -444,7 +487,10 @@
                 if (!res.ok) throw new Error(`status ${res.status}`);
                 const data = await res.json();
                 log.querySelector(".chat-pending").outerHTML =
-                    `<div class="chat-msg chat-agent">${escapeHtml(data.answer)} ${sourceBadge(data.source)}</div>`;
+                    `<div class="chat-msg chat-agent">
+                        <div>${escapeHtml(data.answer)} ${sourceBadge(data.source)}</div>
+                        ${ragEvidenceHtml(data)}
+                    </div>`;
             } catch (e) {
                 log.querySelector(".chat-pending").outerHTML =
                     `<div class="chat-msg chat-agent">Sorry, something went wrong: ${escapeHtml(e.message)}</div>`;

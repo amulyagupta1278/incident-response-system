@@ -1,57 +1,30 @@
-import json
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
-from agents.llm import complete_json, get_model, llm_available
-
-ANSWER_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "properties": {"answer": {"type": "string"}},
-    "required": ["answer"],
-    "additionalProperties": False,
-}
-
-CONTEXT_KEYS = (
-    "service",
-    "severity",
-    "alert_description",
-    "current_status",
-    "root_cause",
-    "log_anomalies",
-    "log_context_cache",
-    "metric_anomalies",
-    "deployment_changes",
-    "affected_users",
-    "estimated_revenue_impact_per_minute",
-    "revenue_impact_justification",
-    "recovery_recommendations",
-    "similar_incidents",
-)
+from agents.llm import llm_available, llm_strict_mode
+from agents.rag import answer_with_rag
 
 
-async def answer_question(record: Dict[str, Any], question: str) -> Tuple[str, str]:
-    """Answer a natural-language question about one incident, grounded in its
-    record. LLM when configured, keyword heuristics otherwise."""
+async def answer_question(record: Dict[str, Any], question: str) -> Dict[str, Any]:
+    """Answer a question through retrieval-grounded incident evidence.
+
+    With OpenAI configured, this is a proper RAG path: build evidence chunks,
+    retrieve the most relevant chunks, then answer only from those chunks with
+    citations. Without an LLM provider, return deterministic heuristic output
+    so the UI remains usable in local demo mode.
+    """
     if llm_available():
-        context: Dict[str, Any] = {k: record.get(k) for k in CONTEXT_KEYS}
-        prompt: str = (
-            f"Incident data:\n{json.dumps(context, default=str)}\n\n"
-            f"Question: {question}\n\n"
-            "Answer in 1-3 plain-text sentences, grounded strictly in the data "
-            "above. If the data does not contain the answer, say so explicitly."
-        )
         try:
-            result: Dict[str, Any] = await complete_json(
-                system="You answer questions about a production incident using only the provided data.",
-                prompt=prompt,
-                schema=ANSWER_SCHEMA,
-                schema_name="incident_answer",
-            )
-            answer: str = str(result.get("answer", "")).strip()
-            if answer:
-                return answer, f"llm:{get_model()}"
+            return await answer_with_rag(record, question)
         except Exception as exc:
-            print(f"[qa] LLM answer failed, using heuristic: {exc}")
-    return _heuristic_answer(record, question), "heuristic"
+            if llm_strict_mode():
+                raise RuntimeError(f"RAG answer failed in strict mode: {exc}") from exc
+            print(f"[qa] RAG answer failed, using heuristic: {exc}")
+    return {
+        "answer": _heuristic_answer(record, question),
+        "source": "heuristic",
+        "citations": [],
+        "retrieved_chunks": [],
+    }
 
 
 def _heuristic_answer(record: Dict[str, Any], question: str) -> str:

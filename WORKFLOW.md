@@ -63,7 +63,7 @@ This means an observer watching the dashboard sees partial results appear progre
 
 ## 4. Interactive Q&A
 
-`POST /api/incidents/{id}/ask` with `{"question": "..."}`. `agents/qa.py::answer_question` grounds the LLM strictly in a fixed slice of the incident record (`CONTEXT_KEYS`) and instructs it to say so explicitly if the data doesn't contain the answer — no open-ended generation. Falls back to keyword-routed heuristic answers (root cause / impact / deployments / logs / metrics / similar incidents / recommendations) with no LLM configured. Available the instant an incident exists, even mid-investigation — ask "what's the status?" while agents are still working.
+`POST /api/incidents/{id}/ask` with `{"question": "..."}`. `agents/qa.py::answer_question` uses `agents/rag.py` to build incident evidence chunks, retrieve the most relevant chunks with OpenAI embeddings, and answer only from those retrieved chunks with citations. If the retrieved evidence is insufficient, the answer must say what is missing. With no LLM configured, it falls back to keyword-routed heuristic answers (root cause / impact / deployments / logs / metrics / similar incidents / recommendations). Available the instant an incident exists, even mid-investigation — ask "what's the status?" while agents are still working.
 
 ## 5. Human Approval Gate
 

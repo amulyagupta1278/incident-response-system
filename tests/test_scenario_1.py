@@ -58,6 +58,25 @@ def test_scenario_1_business_impact(scenario_1_state: IncidentState) -> None:
 
     assert state.affected_users > 0
     assert state.estimated_revenue_impact_per_minute > 0
+    assert state.revenue_impact_justification["verification_status"] == "verified_estimate"
+    assert state.revenue_impact_justification["confidence_level"] == "high"
+    assert state.revenue_impact_justification["data_gaps"] == []
+
+
+def test_business_impact_marks_default_assumptions() -> None:
+    state = IncidentState(
+        incident_id="unknown-impact",
+        timestamp="2026-07-07T14:32:15Z",
+        alert_description="Unknown service failure",
+        service="unknown-service",
+        severity="critical",
+    )
+    state = business_impact(state)
+
+    impact = state.revenue_impact_justification
+    assert impact["verification_status"] == "assumption_based_estimate"
+    assert impact["confidence_level"] == "medium"
+    assert impact["data_gaps"]
 
 
 def test_scenario_1_complete_flow(scenario_1_state: IncidentState) -> None:

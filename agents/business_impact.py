@@ -1,14 +1,18 @@
 from typing import Any
 from datetime import datetime
 from agents import IncidentState
+from agents.gateway_store import get_service_business_config
 from mock_data import load_service_config
 
 
 def business_impact(state: IncidentState) -> IncidentState:
     service_config: dict[str, Any] = load_service_config()
 
-    service_configured: bool = state.service in service_config
-    service_data: dict[str, Any] = service_config.get(state.service, {
+    gateway_config: dict[str, Any] | None = get_service_business_config(
+        state.project_id, state.service
+    )
+    service_configured: bool = bool(gateway_config) or state.service in service_config
+    service_data: dict[str, Any] = gateway_config or service_config.get(state.service, {
         "total_users": 10000,
         "revenue_per_user_per_minute": 0.5
     })
@@ -55,9 +59,9 @@ def business_impact(state: IncidentState) -> IncidentState:
         "confidence_level": confidence_level,
         "data_gaps": data_gaps,
         "evidence_sources": {
-            "service_config": "configured" if service_configured else "fallback_default",
+            "service_config": "project_config" if gateway_config else "configured" if service_configured else "fallback_default",
             "impact_rate": impact_source,
-            "revenue_rate": "service_config" if service_configured else "fallback_default",
+            "revenue_rate": "project_config" if gateway_config else "service_config" if service_configured else "fallback_default",
         },
         "total_service_users": total_users,
         "observed_impact_rate": impact_rate,

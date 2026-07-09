@@ -1,11 +1,14 @@
 import asyncio
 import os
+import hmac
+import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
@@ -13,12 +16,42 @@ load_dotenv()
 
 from agents import IncidentState
 from agents.agentic_system import get_compiled_graph
+from agents.event_gateway import github_event_to_body, normalize_event, supabase_event_to_body
+from agents.gateway_store import (
+    authenticate_api_key,
+    claim_next_job,
+    create_incident,
+    get_incident as get_persistent_incident,
+    init_store,
+    load_state_inputs,
+    save_evidence_event,
+    save_incident_record,
+    update_job,
+    upsert_service_business_config,
+)
 from agents.llm import get_model, get_provider, get_timeout_seconds, llm_strict_mode
 from agents.memory import record_incident
 from agents.notify import post_war_room, war_room_configured
 from agents.qa import answer_question
 
-app: FastAPI = FastAPI(title="AI Operations Command Center")
+_gateway_worker_task: asyncio.Task | None = None
+_rate_limits: Dict[str, List[float]] = {}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> Any:
+    global _gateway_worker_task
+    init_store()
+    if os.getenv("GATEWAY_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+        _gateway_worker_task = asyncio.create_task(_gateway_worker_loop())
+    try:
+        yield
+    finally:
+        if _gateway_worker_task:
+            _gateway_worker_task.cancel()
+
+
+app: FastAPI = FastAPI(title="AI Operations Command Center", lifespan=lifespan)
 
 
 def _allowed_origins() -> List[str]:
@@ -55,6 +88,8 @@ def _serialize_state(values: Dict[str, Any]) -> Dict[str, Any]:
         "alert_description": values.get("alert_description"),
         "service": values.get("service"),
         "severity": values.get("severity"),
+        "project_id": values.get("project_id", ""),
+        "environment": values.get("environment", "production"),
         "log_source_path": values.get("log_source_path", ""),
         "analysis_iterations": values.get("analysis_iterations", 0),
         "rca_confidence": values.get("rca_confidence", 0.0),
@@ -130,6 +165,112 @@ async def _run_analysis(incident_id: str, state: IncidentState) -> None:
         incident_store[incident_id]["error"] = str(exc)
 
 
+async def _run_persistent_analysis(job: Dict[str, Any]) -> None:
+    incident_id: str = str(job["incident_id"])
+    project_id: str = str(job["project_id"])
+    record: Dict[str, Any] | None = get_persistent_incident(incident_id, project_id)
+    if not record:
+        update_job(str(job["job_id"]), "failed", "incident not found")
+        return
+    inputs: Dict[str, List[Dict[str, Any]]] = load_state_inputs(
+        project_id, str(record.get("service"))
+    )
+    state: IncidentState = IncidentState(
+        incident_id=incident_id,
+        timestamp=str(record.get("timestamp") or datetime.now().isoformat()),
+        alert_description=str(record.get("alert_description") or ""),
+        service=str(record.get("service") or "unknown"),
+        severity=str(record.get("severity") or "unknown"),
+        project_id=project_id,
+        environment=str(record.get("environment") or "production"),
+        raw_logs=inputs["logs"],
+        raw_metrics=inputs["metrics"],
+        deployment_changes=inputs["deployments"],
+    )
+    graph: Any = get_compiled_graph()
+    try:
+        async for values in graph.astream(
+            dict(vars(state)),
+            config={"recursion_limit": 60},
+            stream_mode="values",
+        ):
+            if not isinstance(values, dict):
+                values = dict(vars(values))
+            next_record: Dict[str, Any] = _serialize_state(values)
+            next_record["project_id"] = project_id
+            next_record["environment"] = record.get("environment", "production")
+            next_record["created_at"] = record.get("created_at")
+            save_incident_record(project_id, next_record)
+        final_record: Dict[str, Any] | None = get_persistent_incident(incident_id, project_id)
+        if final_record and final_record.get("current_status") != "complete":
+            final_record["current_status"] = "complete"
+            save_incident_record(project_id, final_record)
+        update_job(str(job["job_id"]), "complete")
+    except Exception as exc:
+        failed: Dict[str, Any] | None = get_persistent_incident(incident_id, project_id)
+        if failed:
+            failed["current_status"] = "failed"
+            failed["error"] = str(exc)
+            save_incident_record(project_id, failed)
+        update_job(str(job["job_id"]), "failed", str(exc))
+
+
+async def _gateway_worker_loop() -> None:
+    while True:
+        job: Dict[str, Any] | None = claim_next_job()
+        if job:
+            await _run_persistent_analysis(job)
+            continue
+        await asyncio.sleep(0.75)
+
+
+def _extract_bearer(authorization: str = "") -> str:
+    prefix: str = "Bearer "
+    return authorization[len(prefix):].strip() if authorization.startswith(prefix) else ""
+
+
+def _require_project(authorization: str = "") -> str:
+    project_id: str | None = authenticate_api_key(_extract_bearer(authorization))
+    if not project_id:
+        raise HTTPException(status_code=401, detail="valid bearer API key required")
+    _enforce_rate_limit(project_id)
+    return project_id
+
+
+def _enforce_rate_limit(project_id: str) -> None:
+    limit: int = int(os.getenv("INGEST_RATE_LIMIT_PER_MINUTE", "120"))
+    now: float = time.time()
+    window_start: float = now - 60
+    bucket: List[float] = [ts for ts in _rate_limits.get(project_id, []) if ts >= window_start]
+    if len(bucket) >= limit:
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
+    bucket.append(now)
+    _rate_limits[project_id] = bucket
+
+
+async def _request_json_with_limit(request: Request) -> Dict[str, Any]:
+    max_bytes: int = int(os.getenv("MAX_INGEST_PAYLOAD_BYTES", "262144"))
+    body: bytes = await request.body()
+    if len(body) > max_bytes:
+        raise HTTPException(status_code=413, detail="payload too large")
+    try:
+        parsed: Any = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    return parsed
+
+
+def _verify_optional_signature(body: bytes, signature: str, secret_env: str) -> None:
+    secret: str = os.getenv(secret_env, "")
+    if not secret:
+        return
+    expected: str = "sha256=" + hmac.new(secret.encode(), body, "sha256").hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+
 @app.get("/api/health")
 async def health_check() -> Dict[str, str]:
     return {"status": "healthy"}
@@ -151,6 +292,151 @@ async def get_config() -> Dict[str, Any]:
 @app.get("/api/graph")
 async def get_graph_visualization() -> Dict[str, str]:
     return {"mermaid": get_compiled_graph().get_graph().draw_mermaid()}
+
+
+@app.post("/api/v1/events")
+async def ingest_event(
+    request: Request, authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    project_id: str = _require_project(authorization)
+    body: Dict[str, Any] = await _request_json_with_limit(request)
+    body["project_id"] = project_id
+    try:
+        event, chunks = normalize_event(body, project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    saved: Dict[str, Any] = save_evidence_event(event, chunks)
+    return {
+        "event_id": saved["event_id"],
+        "project_id": project_id,
+        "chunks_created": len(chunks),
+        "status": "accepted",
+    }
+
+
+@app.post("/api/v1/incidents")
+async def create_gateway_incident(
+    request: Request, authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    project_id: str = _require_project(authorization)
+    body: Dict[str, Any] = await _request_json_with_limit(request)
+    service: str = str(body.get("service", "")).strip()
+    if not service:
+        raise HTTPException(status_code=400, detail="service is required")
+    return create_incident(
+        project_id=project_id,
+        service=service,
+        environment=str(body.get("environment") or "production"),
+        alert_description=str(body.get("alert_description") or body.get("description") or ""),
+        severity=str(body.get("severity") or "unknown"),
+        timestamp=str(body.get("timestamp") or datetime.now().isoformat()),
+    )
+
+
+@app.post("/api/v1/service-config")
+async def upsert_gateway_service_config(
+    request: Request, authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    project_id: str = _require_project(authorization)
+    body: Dict[str, Any] = await _request_json_with_limit(request)
+    service: str = str(body.get("service", "")).strip()
+    if not service:
+        raise HTTPException(status_code=400, detail="service is required")
+    total_users: int = int(body.get("total_users", 0))
+    revenue_rate: float = float(body.get("revenue_per_user_per_minute", 0))
+    if total_users <= 0 or revenue_rate <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="total_users and revenue_per_user_per_minute must be positive",
+        )
+    upsert_service_business_config(
+        project_id=project_id,
+        service=service,
+        total_users=total_users,
+        revenue_per_user_per_minute=revenue_rate,
+        impact_metric=str(body.get("impact_metric") or "error_rate"),
+    )
+    return {"project_id": project_id, "service": service, "status": "configured"}
+
+
+@app.get("/api/v1/incidents/{incident_id}")
+async def get_gateway_incident(
+    incident_id: str, authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    project_id: str = _require_project(authorization)
+    record: Dict[str, Any] | None = get_persistent_incident(incident_id, project_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return record
+
+
+@app.post("/api/v1/incidents/{incident_id}/ask")
+async def ask_gateway_incident(
+    incident_id: str, request: Request, authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    project_id: str = _require_project(authorization)
+    body: Dict[str, Any] = await _request_json_with_limit(request)
+    question: str = str(body.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+    record: Dict[str, Any] | None = get_persistent_incident(incident_id, project_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    result: Dict[str, Any] = await answer_question(record, question)
+    result["evidence_confidence"] = "high" if result.get("citations") else "insufficient"
+    result["missing_evidence"] = [] if result.get("citations") else ["cited evidence"]
+    return result
+
+
+@app.post("/api/v1/connectors/github/webhook")
+async def github_webhook(
+    request: Request,
+    authorization: str = Header(default=""),
+    x_github_event: str = Header(default="push"),
+    x_hub_signature_256: str = Header(default=""),
+) -> Dict[str, Any]:
+    project_id: str = _require_project(authorization)
+    raw_body: bytes = await request.body()
+    _verify_optional_signature(raw_body, x_hub_signature_256, "GITHUB_WEBHOOK_SECRET")
+    payload: Any = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    body: Dict[str, Any] = github_event_to_body(payload, x_github_event)
+    body["project_id"] = project_id
+    event, chunks = normalize_event(body, project_id)
+    saved: Dict[str, Any] = save_evidence_event(event, chunks)
+    return {
+        "event_id": saved["event_id"],
+        "project_id": project_id,
+        "connector": "github",
+        "chunks_created": len(chunks),
+        "status": "accepted",
+    }
+
+
+@app.post("/api/v1/connectors/supabase/webhook")
+async def supabase_webhook(
+    request: Request,
+    authorization: str = Header(default=""),
+    x_supabase_signature: str = Header(default=""),
+) -> Dict[str, Any]:
+    project_id: str = _require_project(authorization)
+    raw_body: bytes = await request.body()
+    _verify_optional_signature(raw_body, x_supabase_signature, "SUPABASE_WEBHOOK_SECRET")
+    payload: Any = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    body: Dict[str, Any] = supabase_event_to_body(payload)
+    body["project_id"] = project_id
+    event, chunks = normalize_event(body, project_id)
+    saved: Dict[str, Any] = save_evidence_event(event, chunks)
+    return {
+        "event_id": saved["event_id"],
+        "project_id": project_id,
+        "connector": "supabase",
+        "chunks_created": len(chunks),
+        "status": "accepted",
+    }
 
 
 @app.post("/api/incidents/trigger")

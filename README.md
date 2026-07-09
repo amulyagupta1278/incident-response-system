@@ -105,6 +105,70 @@ cp data/kaggle/<log-file>.log data/live_logs/my-service.log
 
 Large Kaggle/project logs should stay out of git. `data/live_logs/` and `data/kaggle/` are ignored.
 
+## Railway Deployment
+
+This project is Railway-first for production because the backend runs FastAPI plus long-running agent jobs. `railway.toml` starts the app with:
+
+```bash
+python -m uvicorn app:app --host 0.0.0.0 --port $PORT
+```
+
+Set these Railway variables:
+
+```text
+OPENAI_API_KEY=<server-side key>
+OPENAI_MODEL=gpt-4o
+LLM_STRICT_MODE=true
+ALLOWED_ORIGINS=https://your-nextjs-app.vercel.app,https://your-railway-domain.up.railway.app
+PUBLIC_BASE_URL=https://your-railway-domain.up.railway.app
+INGEST_API_KEYS=demo-project:<replace-with-strong-key>
+APP_ENV=production
+GATEWAY_WORKER_ENABLED=true
+RAW_PAYLOAD_RETENTION_DAYS=0
+```
+
+Next.js can be a separate frontend. Keep AI/RAG/OpenAI and webhook secrets on this Railway backend, then call `/api/v1/*` from Next.js with a server-side bearer key.
+
+## Universal Ingest API
+
+Connect any app, GitHub repo, Supabase project, or backend by sending evidence:
+
+```bash
+curl -s -X POST "$PUBLIC_BASE_URL/api/v1/events" \
+  -H "Authorization: Bearer <project-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_type": "log",
+    "source": "custom",
+    "service": "checkout-api",
+    "environment": "production",
+    "payload": {"level": "ERROR", "message": "checkout timeout"}
+  }'
+```
+
+Then create incident job:
+
+```bash
+curl -s -X POST "$PUBLIC_BASE_URL/api/v1/incidents" \
+  -H "Authorization: Bearer <project-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "checkout-api",
+    "severity": "critical",
+    "alert_description": "checkout timeout spike"
+  }'
+```
+
+Useful production endpoints:
+
+- `POST /api/v1/events` - universal evidence ingest
+- `POST /api/v1/service-config` - project revenue/user config
+- `POST /api/v1/incidents` - queue incident analysis
+- `GET /api/v1/incidents/{incident_id}` - persistent incident state
+- `POST /api/v1/incidents/{incident_id}/ask` - cited RAG answer
+- `POST /api/v1/connectors/github/webhook` - GitHub webhook evidence
+- `POST /api/v1/connectors/supabase/webhook` - Supabase webhook evidence
+
 ## Project Structure
 
 ```

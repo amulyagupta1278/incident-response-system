@@ -9,6 +9,8 @@ class IncidentState:
     alert_description: str
     service: str
     severity: str = "unknown"
+    project_id: str = ""
+    environment: str = "production"
     log_source_path: str = ""
     raw_logs: List[Dict[str, Any]] = field(default_factory=list)
     raw_metrics: List[Dict[str, Any]] = field(default_factory=list)

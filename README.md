@@ -407,4 +407,4 @@ MIT
 
 ## Authors
 
-Amulya Gupta & Anujay
+Amulya Gupta

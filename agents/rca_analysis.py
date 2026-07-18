@@ -1,6 +1,31 @@
+from dataclasses import asdict
 from typing import Any
 from datetime import datetime
 from agents import IncidentState
+from agents.confidence import compute_confidence
+from agents.evidence import evidence_refs_from_state
+
+
+def attach_root_cause_trust_metadata(state: IncidentState) -> IncidentState:
+    if not state.root_cause:
+        return state
+
+    if not state.root_cause.get("supporting_evidence_refs"):
+        state.root_cause["supporting_evidence_refs"] = evidence_refs_from_state(
+            state,
+            state.root_cause.get("supporting_evidence", []),
+        )
+
+    llm_self_report: float | None = None
+    if state.root_cause.get("confidence") is not None:
+        try:
+            llm_self_report = float(state.root_cause.get("confidence"))
+        except (TypeError, ValueError):
+            llm_self_report = None
+    state.root_cause["confidence_breakdown"] = asdict(
+        compute_confidence(state, llm_self_report=llm_self_report)
+    )
+    return state
 
 
 def _deploy_correlation(state: IncidentState) -> str:
@@ -138,6 +163,7 @@ def rca_analysis(state: IncidentState) -> IncidentState:
         "ruled_out_hypotheses": ruled_out,
         "deploy_correlation": _deploy_correlation(state)
     }
+    state = attach_root_cause_trust_metadata(state)
 
     invocation: dict[str, Any] = {
         "agent": "rca_analysis",

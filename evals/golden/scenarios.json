@@ -1,0 +1,32 @@
+{
+  "scenario_1": {
+    "service": "payment-api",
+    "timestamp": "2026-07-07T14:32:15Z",
+    "alert_description": "Database connection pool exhaustion detected",
+    "expected_hypothesis": "Database Connection Pool Exhaustion",
+    "min_confidence": 0.55,
+    "max_confidence": 0.95,
+    "required_evidence_terms": ["Connection", "CPU", "deployment"],
+    "required_ruled_out_terms": ["Memory", "Downstream"]
+  },
+  "scenario_2": {
+    "service": "order-processor",
+    "timestamp": "2026-07-07T16:30:00Z",
+    "alert_description": "Memory leak detected - GC pause times increasing",
+    "expected_hypothesis": "Memory Leak",
+    "min_confidence": 0.50,
+    "max_confidence": 0.90,
+    "required_evidence_terms": ["Memory", "GC"],
+    "required_ruled_out_terms": ["Deployment", "Connection"]
+  },
+  "scenario_3": {
+    "service": "checkout-gateway",
+    "timestamp": "2026-07-07T17:05:05Z",
+    "alert_description": "Cascading failure - downstream service timeout",
+    "expected_hypothesis": "Cascading Failure - Downstream Service Timeout",
+    "min_confidence": 0.50,
+    "max_confidence": 0.92,
+    "required_evidence_terms": ["Error rate", "Timeout", "Latency"],
+    "required_ruled_out_terms": ["Resource", "Memory"]
+  }
+}

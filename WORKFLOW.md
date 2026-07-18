@@ -48,7 +48,7 @@ No API key → system runs entirely on deterministic heuristics. This is the sam
 | 8 | `complete` | Graph ends; `record_incident` persists this investigation into memory for future matching | — |
 | — | *(final side effect)* | War-room post: "✅ Investigation complete... N users affected, $X/min. Full report: /incident/{id}" | — |
 
-Every node also appends a structured entry to `agent_invocations` (`agent`, `timestamp`, `action`, `source` — `llm:gpt-4o` / `heuristic_fallback` / `deterministic` / `guardrail`, `reasoning`). This list **is** the audit trail rendered in the UI and the postmortem export.
+Every node also appends a structured entry to `agent_invocations` (`agent`, `timestamp`, `action`, `source` — Codex runtime source such as `llm:gpt-4o` / `heuristic_fallback` / `deterministic` / `guardrail`, `reasoning`). This list **is** the audit trail rendered in the UI and the postmortem export.
 
 ## 3. Live Observation (client side)
 
@@ -63,7 +63,7 @@ This means an observer watching the dashboard sees partial results appear progre
 
 ## 4. Interactive Q&A
 
-`POST /api/incidents/{id}/ask` with `{"question": "..."}`. `agents/qa.py::answer_question` uses `agents/rag.py` to build incident evidence chunks, retrieve the most relevant chunks with OpenAI embeddings, and answer only from those retrieved chunks with citations. If the retrieved evidence is insufficient, the answer must say what is missing. With no LLM configured, it falls back to keyword-routed heuristic answers (root cause / impact / deployments / logs / metrics / similar incidents / recommendations). Available the instant an incident exists, even mid-investigation — ask "what's the status?" while agents are still working.
+`POST /api/incidents/{id}/ask` with `{"question": "..."}`. `agents/qa.py::answer_question` uses `agents/rag.py` to build incident evidence chunks, retrieve the most relevant chunks with Codex/OpenAI embeddings, and answer only from those retrieved chunks with citations. If the retrieved evidence is insufficient, the answer must say what is missing. With no LLM configured, it falls back to keyword-routed heuristic answers (root cause / impact / deployments / logs / metrics / similar incidents / recommendations). Available the instant an incident exists, even mid-investigation — ask "what's the status?" while agents are still working.
 
 ## 5. Human Approval Gate
 
@@ -88,7 +88,7 @@ Each recovery recommendation renders with **Approve** / **Reject** buttons. `POS
 | Failure | Behavior |
 |---|---|
 | No `OPENAI_API_KEY` set | Every LLM-backed agent silently uses its heuristic path; `GET /api/config` reports `llm_provider: "heuristic"` |
-| OpenAI call raises (timeout, rate limit, bad JSON) | Caught per-agent, logged to console, falls back to heuristic result — investigation never halts |
+| Codex/OpenAI call raises (timeout, rate limit, bad JSON) | Caught per-agent, logged to console, falls back to heuristic result — investigation never halts |
 | LLM router picks an action outside the legal set | Guardrail overrides with the deterministic choice; logged with `source: "guardrail"` for visibility, not silently swallowed |
 | RCA confidence stays low after `max_iterations` | Loop exits anyway (bounded), proceeds with best-available hypothesis rather than hanging forever |
 | War-room webhook unreachable | `post_war_room` catches and logs; never raises into the investigation |

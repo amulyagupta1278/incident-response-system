@@ -5,7 +5,7 @@ from typing import Any, Dict
 from agents import IncidentState
 from agents.llm import complete_json, get_model, llm_available, llm_strict_mode
 from agents.memory import find_similar_incidents
-from agents.rca_analysis import rca_analysis
+from agents.rca_analysis import attach_root_cause_trust_metadata, rca_analysis
 
 RCA_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -41,8 +41,8 @@ RCA_SCHEMA: Dict[str, Any] = {
 
 
 async def rca_analysis_with_llm(state: IncidentState) -> IncidentState:
-    """Root cause analysis: reasons over evidence with the configured LLM
-    (OpenAI); falls back to heuristic pattern matching only when no key is
+    """Root cause analysis: reasons over evidence with the configured
+    Codex/OpenAI LLM; falls back to heuristic pattern matching only when no key is
     configured, or when strict mode is disabled."""
     result: Dict[str, Any] = {}
     source: str = "heuristic_fallback"
@@ -103,6 +103,7 @@ async def rca_analysis_with_llm(state: IncidentState) -> IncidentState:
     state.completed_steps.add("rca_analysis")
 
     state.similar_incidents = find_similar_incidents(state)
+    state = attach_root_cause_trust_metadata(state)
     if state.similar_incidents:
         top: Dict[str, Any] = state.similar_incidents[0]
         state.agent_invocations.append(

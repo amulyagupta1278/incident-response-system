@@ -2,6 +2,23 @@
 
 Autonomous Multi-Agent Incident Response System
 
+## Unified Super-Repo
+
+This repository combines secure incident ingestion with command-center intelligence:
+
+- Project-scoped API keys, browser keys, credential rotation, audit trails, and readiness checks
+- Signed GitHub and Supabase webhooks with replay protection
+- Universal backend/browser evidence ingestion and persistent incident jobs
+- Eight-stage investigation workflow with dedicated deployment analysis
+- Bounded RCA debate using evidence and operations critics
+- Business impact, stakeholder communication, and risk-tagged recovery plans
+- Hybrid operational knowledge retrieval with optional Qdrant vectors
+- Memgraph-backed incident graph memory with local fallback
+- Incident analytics, knowledge graph, RAG search, and Jarvis-style assistant under `/intelligence`
+- OpenAI, Gemini, Groq, and OpenRouter through one OpenAI-compatible LLM interface
+
+Security boundary remains consistent across merged features: `/api/v1/*` intelligence endpoints require project server credentials and only read that project's incident records.
+
 > See **[SUBMISSION.md](SUBMISSION.md)** for a project overview and key differentiators, **[ARCHITECTURE.md](ARCHITECTURE.md)** for the technical deep-dive and diagrams, and **[WORKFLOW.md](WORKFLOW.md)** for a step-by-step system walkthrough.
 
 ## Problem
@@ -19,7 +36,7 @@ The AI Operations Command Center is a multi-agent system that orchestrates auton
 5. **Business Impact** - Calculate affected users and revenue impact
 6. **Executive Summary** - Generate engineering and executive reports
 
-Powered by LangGraph orchestration with LLM reasoning from **OpenAI (ChatGPT / GPT-4o)**. The router, RCA, and report-writing agents all reason with the LLM; every agent has a deterministic fallback so the system also runs fully offline in heuristic mode.
+Powered by LangGraph orchestration with **Codex-style agent reasoning backed by the OpenAI API**. The router, RCA, and report-writing agents all reason with the configured LLM; every agent has a deterministic fallback so the system also runs fully offline in heuristic mode.
 
 ## Architecture
 
@@ -48,7 +65,7 @@ pytest
 python app.py
 ```
 
-Then open http://localhost:8000 in a browser.
+Start Next.js UI from `web/`, then open http://localhost:3000. FastAPI remains at http://localhost:8000.
 
 ## Demo
 
@@ -138,7 +155,7 @@ SUPABASE_WEBHOOK_SECRET=<supabase-webhook-secret>
 
 For one demo project, env keys are fine. For many real projects, use admin provisioning instead of adding every project to `.env`.
 
-Next.js can be a separate frontend. Keep AI/RAG/OpenAI and webhook secrets on this Railway backend, then call `/api/v1/*` from Next.js with a server-side bearer key.
+Next.js can be a separate frontend. Keep Codex/RAG/OpenAI runtime and webhook secrets on this Railway backend, then call `/api/v1/*` from Next.js with a server-side bearer key.
 
 Security model:
 
@@ -237,7 +254,7 @@ curl -s "$PUBLIC_BASE_URL/api/v1/readiness" \
   -H "Authorization: Bearer <project-api-key>"
 ```
 
-This returns `ready`, `degraded`, or `blocked` plus non-secret checks for OpenAI mode, direct GitHub/Supabase secrets, browser origin allowlist, demo-route status, payload limit, rate limit, and raw payload retention.
+This returns `ready`, `degraded`, or `blocked` plus non-secret checks for Codex LLM mode, direct GitHub/Supabase secrets, browser origin allowlist, demo-route status, payload limit, rate limit, and raw payload retention.
 
 Audit trail helper:
 
@@ -288,10 +305,9 @@ incident-response-system/
 │   ├── scenario_1/                # DB Pool (50 → 30 connection limit)
 │   ├── scenario_2/                # Memory Leak (500MB → 2000MB)
 │   └── scenario_3/                # Cascading Failure (timeout cascade)
-├── frontend/                       # Vanilla HTML/CSS/JS
-│   ├── dashboard.html             # Incident list & triggers
-│   ├── incident_detail.html       # Full analysis view
-│   └── styles.css                 # Professional UI
+├── frontend/                       # Browser ingest SDK
+│   └── immune-agent.js            # Client telemetry collector
+├── web/                            # Next.js command center UI
 ├── tests/                         # pytest suite
 │   ├── test_scenario_1.py
 │   ├── test_scenario_2.py
@@ -349,7 +365,7 @@ All three scenarios pass with:
 - **Python 3.10+** - Core language
 - **LangGraph** - Agent orchestration
 - **FastAPI** - REST backend (analysis runs as a background task; the UI polls live progress)
-- **OpenAI (gpt-4o)** - LLM reasoning, configured via `OPENAI_API_KEY` in `.env`
+- **Codex agent reasoning** - LLM reasoning backed by the OpenAI API, configured via `OPENAI_API_KEY` in `.env`
 - **Pydantic** - Data validation
 - **pytest** - Testing
 - **Vanilla HTML/CSS/JavaScript** - Frontend (no build step)

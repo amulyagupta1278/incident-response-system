@@ -80,7 +80,7 @@ def main() -> None:
             headers=_auth("hackathon-server-key"),
         )
         _expect(readiness.status_code == 200, "readiness should require valid server key")
-        _expect(readiness.json()["status"] == "degraded", "offline smoke should be degraded only by missing OpenAI")
+        _expect(readiness.json()["status"] == "degraded", "offline smoke should be degraded only by missing Codex/OpenAI runtime")
         _expect(
             readiness.json()["connectors"]["github_direct"]
             and readiness.json()["connectors"]["supabase_direct"],

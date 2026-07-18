@@ -7,8 +7,8 @@ from agents.rag import EvidenceChunk, answer_with_rag, build_incident_chunks, re
 async def answer_question(record: Dict[str, Any], question: str) -> Dict[str, Any]:
     """Answer a question through retrieval-grounded incident evidence.
 
-    With OpenAI configured, this is a proper RAG path: build evidence chunks,
-    retrieve the most relevant chunks, then answer only from those chunks with
+    With the Codex/OpenAI LLM runtime configured, this is a proper RAG path:
+    build evidence chunks, retrieve the most relevant chunks, then answer only from those chunks with
     citations. Without an LLM provider, return deterministic retrieval output
     with citations so the UI remains usable without allowing uncited claims.
     """

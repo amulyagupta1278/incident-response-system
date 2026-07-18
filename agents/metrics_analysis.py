@@ -31,12 +31,22 @@ def metrics_analysis(state: IncidentState) -> IncidentState:
             percent_change: float = ((current_value - baseline_value) / baseline_value * 100) if baseline_value > 0 else 0
 
             if abs(percent_change) > 50:
+                incident_metric: dict[str, Any] = next(
+                    (
+                        metric
+                        for metric in state.raw_metrics
+                        if str(metric.get("metric_name", "")).lower() == metric_name
+                        and str(metric.get("window", "")).lower() == "incident"
+                    ),
+                    {},
+                )
                 anomaly: dict[str, Any] = {
                     "metric_name": metric_name,
                     "baseline": baseline_value,
                     "current": current_value,
                     "percent_change": round(percent_change, 2),
-                    "severity": "critical" if abs(percent_change) > 150 else "high" if abs(percent_change) > 75 else "medium"
+                    "severity": "critical" if abs(percent_change) > 150 else "high" if abs(percent_change) > 75 else "medium",
+                    "evidence_id": incident_metric.get("evidence_id"),
                 }
                 state.metric_anomalies.append(anomaly)
 

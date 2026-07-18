@@ -5,14 +5,19 @@ from langgraph.graph import END, StateGraph
 
 from agents import IncidentState
 from agents.business_impact import business_impact
+from agents.debate import run_rca_debate
+from agents.deployment_analysis import deployment_analysis
 from agents.executive_summary import executive_summary
 from agents.incident_commander import incident_commander
 from agents.llm import complete_json, get_model, llm_available, llm_strict_mode
 from agents.log_analysis import log_analysis
 from agents.metrics_analysis import metrics_analysis
+from agents.quality import evaluate_quality_gates
 from agents.rca_agent import rca_analysis_with_llm
+from agents.recovery_recommendations import recovery_recommendations
 from agents.request_more_data_agent import request_more_data
 from agents.router_agent import route_next_action_agentic, should_request_more_data
+from agents.stakeholder_updates import stakeholder_updates
 
 _compiled_graph: Any = None
 
@@ -61,8 +66,13 @@ def _analyze_metrics_node(state: IncidentState) -> Dict[str, Any]:
     return _as_updates(state)
 
 
+def _analyze_deployments_node(state: IncidentState) -> Dict[str, Any]:
+    return _as_updates(deployment_analysis(state))
+
+
 async def _run_rca_node(state: IncidentState) -> Dict[str, Any]:
     state = await rca_analysis_with_llm(state)
+    state = run_rca_debate(state)
     state.current_status = "rca_completed"
     return _as_updates(state)
 
@@ -79,9 +89,20 @@ def _business_impact_node(state: IncidentState) -> Dict[str, Any]:
     return _as_updates(state)
 
 
+def _stakeholder_updates_node(state: IncidentState) -> Dict[str, Any]:
+    state = stakeholder_updates(state)
+    state.completed_steps.add("stakeholder_updates")
+    return _as_updates(state)
+
+
+async def _recovery_plan_node(state: IncidentState) -> Dict[str, Any]:
+    return _as_updates(await recovery_recommendations(state))
+
+
 async def _generate_summary_node(state: IncidentState) -> Dict[str, Any]:
     state = executive_summary(state)
     state = await _enhance_summary_with_llm(state)
+    state.quality_gates = evaluate_quality_gates(state)
     state.completed_steps.add("summary")
     state.current_status = "complete"
     return _as_updates(state)
@@ -148,9 +169,12 @@ def create_incident_analysis_graph() -> Any:
     graph.add_node("load_data", _load_data_node)
     graph.add_node("analyze_logs", _analyze_logs_node)
     graph.add_node("analyze_metrics", _analyze_metrics_node)
+    graph.add_node("analyze_deployments", _analyze_deployments_node)
     graph.add_node("run_rca", _run_rca_node)
     graph.add_node("request_more_data", _request_more_data_node)
     graph.add_node("calculate_business_impact", _business_impact_node)
+    graph.add_node("generate_stakeholder_updates", _stakeholder_updates_node)
+    graph.add_node("generate_recovery_plan", _recovery_plan_node)
     graph.add_node("generate_summary", _generate_summary_node)
 
     graph.add_conditional_edges(
@@ -160,9 +184,12 @@ def create_incident_analysis_graph() -> Any:
             "load_data": "load_data",
             "analyze_logs": "analyze_logs",
             "analyze_metrics": "analyze_metrics",
+            "analyze_deployments": "analyze_deployments",
             "run_rca": "run_rca",
             "request_more_data": "request_more_data",
             "calculate_business_impact": "calculate_business_impact",
+            "generate_stakeholder_updates": "generate_stakeholder_updates",
+            "generate_recovery_plan": "generate_recovery_plan",
             "generate_summary": "generate_summary",
             "complete": END,
         },
@@ -172,8 +199,11 @@ def create_incident_analysis_graph() -> Any:
         "load_data",
         "analyze_logs",
         "analyze_metrics",
+        "analyze_deployments",
         "request_more_data",
         "calculate_business_impact",
+        "generate_stakeholder_updates",
+        "generate_recovery_plan",
     ]:
         graph.add_edge(node, "route_next_action")
 

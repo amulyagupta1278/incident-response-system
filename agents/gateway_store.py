@@ -25,7 +25,7 @@ def database_path() -> str:
 def database_backend() -> str:
     url: str = os.getenv("DATABASE_URL", "").strip().lower()
     if url.startswith(("postgres://", "postgresql://")):
-        return "postgres_configured"
+        return "postgres_configured_unsupported"
     return "sqlite"
 
 
@@ -701,6 +701,21 @@ def get_incident(incident_id: str, project_id: str | None = None) -> Optional[Di
     with connect() as conn:
         row = conn.execute(query, args).fetchone()
     return json.loads(row["record_json"]) if row else None
+
+
+def list_incidents(project_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    safe_limit: int = min(max(int(limit), 1), 500)
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT record_json FROM incidents
+            WHERE project_id = ?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (project_id, safe_limit),
+        ).fetchall()
+    return [json.loads(row["record_json"]) for row in rows]
 
 
 def save_incident_record(project_id: str, record: Dict[str, Any]) -> None:

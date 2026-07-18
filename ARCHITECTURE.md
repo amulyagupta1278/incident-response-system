@@ -35,7 +35,7 @@ flowchart LR
     end
 
     subgraph Support["Support Services"]
-        LLM["LLM Layer\n(agents/llm.py)\nOpenAI gpt-4o"]
+        LLM["Codex LLM Layer\n(agents/llm.py)\nOpenAI API / gpt-4o"]
         MEM["Incident Memory\n(data/incident_memory.json)"]
         NOTIFY["War-Room Notify\n(Slack / Discord webhook)"]
         DATA["Mock Telemetry\n(logs / metrics / deployments)"]
@@ -174,7 +174,7 @@ Because state is a plain dataclass converted to/from `dict` at graph boundaries 
 | Layer | Choice | Why |
 |---|---|---|
 | Orchestration | LangGraph (`StateGraph`) | Conditional edges give a real state machine with loops, not a linear chain |
-| LLM | OpenAI `gpt-4o`, strict JSON schema mode | Structured outputs eliminate parsing failures; strict mode rejects malformed shapes at the API level |
+| LLM | Codex agent reasoning backed by OpenAI `gpt-4o`, strict JSON schema mode | Structured outputs eliminate parsing failures; strict mode rejects malformed shapes at the API level |
 | Backend | FastAPI + `asyncio.create_task` | Non-blocking trigger endpoint; analysis streams in the background while the UI polls |
 | Frontend | Vanilla HTML/CSS/JS, no build step | Minimal setup — clone, `python app.py`, open browser |
 | Memory | Flat JSON file | Sufficient for the current scenario corpus; interface is embedding-store-ready |

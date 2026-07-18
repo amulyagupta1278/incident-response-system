@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
@@ -39,6 +39,7 @@ from agents.gateway_store import (
     init_store,
     list_evidence_chunks,
     list_evidence_edges,
+    list_incidents as list_persistent_incidents,
     load_state_inputs,
     project_has_browser_key,
     project_exists,
@@ -56,8 +57,24 @@ from agents.gateway_store import (
 )
 from agents.llm import get_model, get_provider, get_timeout_seconds, llm_strict_mode
 from agents.memory import record_incident
+from agents.analytics import incident_analytics, knowledge_graph
+from agents.connector_registry import CONNECTOR_CATALOG
+from agents.knowledge_base import (
+    initialize_knowledge_base,
+    insert_uploaded_document,
+    retrieval_backend,
+    search_knowledge,
+)
+from agents.query_memory import incident_graph_snapshot, upsert_incidents_graph
 from agents.notify import post_war_room, war_room_configured
 from agents.qa import answer_question
+from agents.slack_assistant import (
+    SlackAssistant,
+    incident_blocks,
+    parse_command,
+    scenario_from_text,
+    summarize_incident,
+)
 
 _gateway_worker_task: asyncio.Task | None = None
 _rate_limits: Dict[str, List[float]] = {}
@@ -67,6 +84,7 @@ _rate_limits: Dict[str, List[float]] = {}
 async def lifespan(app: FastAPI) -> Any:
     global _gateway_worker_task
     init_store()
+    initialize_knowledge_base()
     if os.getenv("GATEWAY_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
         _gateway_worker_task = asyncio.create_task(_gateway_worker_loop())
     try:
@@ -103,6 +121,16 @@ app.add_middleware(
 
 incident_store: Dict[str, Dict[str, Any]] = {}
 incident_order: List[str] = []
+slack_assistant = SlackAssistant()
+
+
+def _require_slack_project() -> str:
+    project_id: str = _project_slug(os.getenv("SLACK_PROJECT_ID", ""))
+    if not project_id:
+        raise HTTPException(status_code=503, detail="SLACK_PROJECT_ID is not configured")
+    if not project_exists(project_id):
+        raise HTTPException(status_code=404, detail="Slack project not found")
+    return project_id
 
 
 def _serialize_state(values: Dict[str, Any]) -> Dict[str, Any]:
@@ -124,19 +152,40 @@ def _serialize_state(values: Dict[str, Any]) -> Dict[str, Any]:
         "log_context_cache": values.get("log_context_cache", {}),
         "metric_anomalies": values.get("metric_anomalies", []),
         "deployment_changes": values.get("deployment_changes", []),
+        "deployment_analysis": values.get("deployment_analysis", {}),
+        "evidence_catalog": values.get("evidence_catalog", {}),
         "root_cause": values.get("root_cause"),
         "affected_users": values.get("affected_users", 0),
         "estimated_revenue_impact_per_minute": values.get(
             "estimated_revenue_impact_per_minute", 0.0
         ),
+        "estimated_cost_impact_per_minute": values.get(
+            "estimated_cost_impact_per_minute", 0.0
+        ),
+        "business_risk_level": values.get("business_risk_level", "unknown"),
+        "blast_radius": values.get("blast_radius", {}),
         "revenue_impact_justification": values.get(
             "revenue_impact_justification", {}
         ),
         "engineering_summary": values.get("engineering_summary", ""),
         "executive_summary": values.get("executive_summary", ""),
         "recovery_recommendations": values.get("recovery_recommendations", []),
+        "recovery_plan": values.get("recovery_plan", {}),
+        "debate_rounds": values.get("debate_rounds", []),
+        "service_profile": values.get("service_profile", {}),
+        "ownership": values.get("ownership", {}),
+        "dependencies": values.get("dependencies", []),
+        "upstream_services": values.get("upstream_services", []),
+        "runbooks": values.get("runbooks", []),
+        "escalation_path": values.get("escalation_path", []),
+        "rollback_plan": values.get("rollback_plan", {}),
+        "stakeholder_updates": values.get("stakeholder_updates", {}),
+        "troubleshooting_plan": values.get("troubleshooting_plan", []),
+        "kpi_guardrails": values.get("kpi_guardrails", {}),
         "similar_incidents": values.get("similar_incidents", []),
         "agent_invocations": values.get("agent_invocations", []),
+        "review_events": values.get("review_events", []),
+        "quality_gates": values.get("quality_gates", {}),
     }
 
 
@@ -427,6 +476,15 @@ def _record_connector_delivery(
         raise HTTPException(status_code=409, detail="duplicate webhook delivery")
 
 
+def _require_direct_connector_project(project_id: str, delivery_id: str) -> str:
+    project_id = _project_slug(project_id)
+    if not project_exists(project_id):
+        raise HTTPException(status_code=404, detail="project not found")
+    if not delivery_id:
+        raise HTTPException(status_code=400, detail="delivery id required")
+    return project_id
+
+
 def _public_base_url() -> str:
     return os.getenv("PUBLIC_BASE_URL", "").rstrip("/") or "http://localhost:8000"
 
@@ -538,7 +596,7 @@ def _readiness_payload(project_id: str) -> Dict[str, Any]:
         "openai_llm",
         get_provider() == "openai",
         "warning",
-        "OpenAI provider active; fallback mode only when key missing.",
+        "Codex LLM runtime active via OpenAI provider; fallback mode only when key missing.",
     )
     add_check(
         "connector_signatures",
@@ -590,14 +648,13 @@ def _readiness_payload(project_id: str) -> Dict[str, Any]:
     )
     storage_ready: bool = (
         not production
-        or database_backend() == "postgres_configured"
         or production_sqlite_allowed()
     )
     add_check(
         "production_database",
         storage_ready,
         "blocking" if production else "info",
-        "Production should use DATABASE_URL-backed Postgres; SQLite allowed only by explicit override.",
+        "Production currently uses SQLite; set ALLOW_SQLITE_IN_PRODUCTION=true for hackathon or add real Postgres driver support.",
     )
 
     blocking_failed: list[dict[str, Any]] = [
@@ -1044,6 +1101,14 @@ async def get_gateway_readiness(authorization: str = Header(default="")) -> Dict
     return _readiness_payload(project_id)
 
 
+@app.get("/api/v1/incidents")
+async def list_gateway_incidents(
+    authorization: str = Header(default=""), limit: int = 100
+) -> List[Dict[str, Any]]:
+    project_id: str = _require_project(authorization)
+    return [_with_gateway_context(record) for record in list_persistent_incidents(project_id, limit)]
+
+
 @app.get("/api/v1/audit")
 async def get_gateway_audit(
     authorization: str = Header(default=""), limit: int = 100
@@ -1053,6 +1118,91 @@ async def get_gateway_audit(
         "project_id": project_id,
         "events": list_audit_events(project_id, limit),
     }
+
+
+@app.get("/api/v1/analytics")
+async def get_gateway_analytics(
+    authorization: str = Header(default=""), period: str = Query(default="week")
+) -> Dict[str, Any]:
+    project_id = _require_project(authorization)
+    records = list_persistent_incidents(project_id, 1000)
+    return {"project_id": project_id, **incident_analytics(records, period)}
+
+
+@app.get("/api/v1/knowledge-graph")
+async def get_gateway_knowledge_graph(
+    authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    project_id = _require_project(authorization)
+    records = list_persistent_incidents(project_id, 1000)
+    upsert_incidents_graph(records)
+    return {
+        "project_id": project_id,
+        "relational": knowledge_graph(records),
+        "operational": incident_graph_snapshot(records),
+    }
+
+
+@app.get("/api/v1/knowledge/search")
+async def search_gateway_knowledge(
+    q: str = Query(min_length=1),
+    authorization: str = Header(default=""),
+) -> Dict[str, Any]:
+    project_id = _require_project(authorization)
+    hits = search_knowledge(q, max_results=8)
+    return {
+        "project_id": project_id,
+        "query": q,
+        "backend": retrieval_backend(),
+        "results": [vars(hit) for hit in hits],
+    }
+
+
+@app.post("/api/v1/knowledge/upload")
+async def upload_gateway_knowledge(
+    request: Request, authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    project_id = _require_project(authorization)
+    body = await _request_json_with_limit(request)
+    content = str(body.get("content") or "").strip()
+    filename = str(body.get("filename") or "uploaded-knowledge.txt").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required")
+    chunk = insert_uploaded_document(content, f"{project_id}-{filename}")
+    _audit(project_id, "knowledge_uploaded", "server_api_key", "project", {
+        "filename": filename, "chunk_id": chunk.chunk_id, "content_length": len(content)
+    })
+    return {"project_id": project_id, "chunk": vars(chunk)}
+
+
+@app.get("/api/v1/connectors/catalog")
+async def get_gateway_connector_catalog(
+    authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    project_id = _require_project(authorization)
+    return {"project_id": project_id, "connectors": CONNECTOR_CATALOG}
+
+
+@app.post("/api/v1/assistant/chat")
+async def gateway_assistant_chat(
+    request: Request, authorization: str = Header(default="")
+) -> Dict[str, Any]:
+    project_id = _require_project(authorization)
+    body = await _request_json_with_limit(request)
+    question = str(body.get("question") or body.get("message") or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+    incident_id = str(body.get("incident_id") or "").strip()
+    record = get_persistent_incident(incident_id, project_id) if incident_id else None
+    if record is None:
+        records = list_persistent_incidents(project_id, 1)
+        record = records[0] if records else {
+            "project_id": project_id,
+            "current_status": "no_incidents",
+            "service": "unknown",
+        }
+    result = await answer_question(_with_gateway_context(record), question)
+    return {"project_id": project_id, "incident_id": record.get("incident_id"), **result}
 
 
 @app.get("/api/v1/incidents/{incident_id}")
@@ -1094,6 +1244,156 @@ async def ask_gateway_incident(
         },
     )
     return result
+
+
+@app.post("/api/slack/commands")
+async def slack_commands(
+    request: Request,
+    x_slack_signature: str = Header(default=""),
+    x_slack_request_timestamp: str = Header(default=""),
+) -> Dict[str, Any]:
+    body, payload = await slack_assistant.read_payload(request)
+    await slack_assistant.verify_request(
+        body,
+        x_slack_signature=x_slack_signature,
+        x_slack_request_timestamp=x_slack_request_timestamp,
+    )
+    project_id: str = _require_slack_project()
+    command, rest = parse_command(str(payload.get("text", "")))
+
+    if command == "trigger":
+        scenario: Dict[str, str] = scenario_from_text(rest)
+        created: Dict[str, Any] = create_incident(
+            project_id=project_id,
+            service=scenario["service"],
+            environment="production",
+            alert_description=scenario["alert_description"],
+            severity=scenario["severity"],
+            timestamp=scenario["timestamp"],
+        )
+        _audit(
+            project_id,
+            "slack_incident_triggered",
+            "slack",
+            str(payload.get("user_id") or payload.get("user_name") or "unknown"),
+            {
+                "incident_id": created["incident_id"],
+                "job_id": created["job_id"],
+                "service": scenario["service"],
+            },
+        )
+        return {
+            "response_type": "ephemeral",
+            "text": (
+                f"Queued incident `{created['incident_id']}` for "
+                f"*{scenario['service']}*. Job `{created['job_id']}` is running."
+            ),
+        }
+
+    if command == "status":
+        incident_id: str = rest.strip()
+        if not incident_id:
+            latest: List[Dict[str, Any]] = list_persistent_incidents(project_id, 1)
+            if not latest:
+                return {"response_type": "ephemeral", "text": "No incidents found for this Slack project."}
+            record = latest[0]
+        else:
+            record = get_persistent_incident(incident_id, project_id)
+            if not record:
+                return {"response_type": "ephemeral", "text": f"Incident `{incident_id}` was not found."}
+        return {
+            "response_type": "ephemeral",
+            "text": summarize_incident(_with_gateway_context(record)),
+            "blocks": incident_blocks(_with_gateway_context(record), slack_assistant),
+        }
+
+    if command == "ask":
+        incident_id, _, question = rest.partition(" ")
+        if not incident_id or not question.strip():
+            return {"response_type": "ephemeral", "text": "Usage: `/aioc ask <incident_id> <question>`"}
+        record = get_persistent_incident(incident_id, project_id)
+        if not record:
+            return {"response_type": "ephemeral", "text": f"Incident `{incident_id}` was not found."}
+        answer = await answer_question(_with_gateway_context(record), question.strip())
+        _audit(
+            project_id,
+            "slack_ask_answered",
+            "slack",
+            str(payload.get("user_id") or payload.get("user_name") or "unknown"),
+            {
+                "incident_id": incident_id,
+                "citations": len(answer.get("citations") or []),
+            },
+        )
+        return {
+            "response_type": "ephemeral",
+            "text": answer.get("answer", "No answer produced."),
+        }
+
+    return {"response_type": "ephemeral", "text": slack_assistant.home_text()}
+
+
+@app.post("/api/slack/interactivity")
+async def slack_interactivity(
+    request: Request,
+    x_slack_signature: str = Header(default=""),
+    x_slack_request_timestamp: str = Header(default=""),
+) -> Dict[str, Any]:
+    body, payload = await slack_assistant.read_payload(request)
+    await slack_assistant.verify_request(
+        body,
+        x_slack_signature=x_slack_signature,
+        x_slack_request_timestamp=x_slack_request_timestamp,
+    )
+    project_id: str = _require_slack_project()
+    action: Dict[str, Any] = (payload.get("actions") or [{}])[0]
+    action_id: str = str(action.get("action_id") or "")
+    incident_id: str = str(action.get("value") or "")
+    record = get_persistent_incident(incident_id, project_id)
+    if not record:
+        return {"response_type": "ephemeral", "text": f"Incident `{incident_id}` was not found."}
+
+    review_event: Dict[str, Any] = {
+        "timestamp": datetime.now().isoformat(),
+        "source": "slack",
+        "user": ((payload.get("user") or {}).get("id") or "unknown"),
+        "action": action_id,
+    }
+    record.setdefault("review_events", []).append(review_event)
+    if action_id == "aioc_accept_rca":
+        record["lifecycle_status"] = "rca_accepted"
+        text = f"RCA accepted for `{incident_id}`. No remediation was executed."
+    elif action_id == "aioc_request_more_data":
+        record["lifecycle_status"] = "needs_more_evidence"
+        text = f"More evidence requested for `{incident_id}`. No remediation was executed."
+    else:
+        text = f"Action `{action_id}` recorded for `{incident_id}`. No remediation was executed."
+    save_incident_record(project_id, record)
+    _audit(
+        project_id,
+        "slack_review_action_recorded",
+        "slack",
+        str(review_event["user"]),
+        {"incident_id": incident_id, "action": action_id},
+    )
+    return {"response_type": "ephemeral", "text": text}
+
+
+@app.post("/api/slack/events")
+async def slack_events(
+    request: Request,
+    x_slack_signature: str = Header(default=""),
+    x_slack_request_timestamp: str = Header(default=""),
+) -> Dict[str, Any]:
+    body, payload = await slack_assistant.read_payload(request)
+    await slack_assistant.verify_request(
+        body,
+        x_slack_signature=x_slack_signature,
+        x_slack_request_timestamp=x_slack_request_timestamp,
+    )
+    if payload.get("type") == "url_verification":
+        return {"challenge": payload.get("challenge", "")}
+    return {"ok": True}
 
 
 @app.post("/api/v1/connectors/github/webhook")
@@ -1146,6 +1446,7 @@ async def github_direct_webhook(
     x_github_delivery: str = Header(default=""),
     x_hub_signature_256: str = Header(default=""),
 ) -> Dict[str, Any]:
+    project_id = _require_direct_connector_project(project_id, x_github_delivery)
     _enforce_rate_limit(f"github:{project_id}")
     raw_body: bytes = await request.body()
     _verify_signature_with_secret(
@@ -1237,6 +1538,8 @@ async def supabase_direct_webhook(
     x_supabase_delivery: str = Header(default=""),
     x_request_id: str = Header(default=""),
 ) -> Dict[str, Any]:
+    delivery_id: str = x_supabase_delivery or x_request_id
+    project_id = _require_direct_connector_project(project_id, delivery_id)
     _enforce_rate_limit(f"supabase:{project_id}")
     raw_body: bytes = await request.body()
     _verify_signature_with_secret(
@@ -1245,9 +1548,7 @@ async def supabase_direct_webhook(
         _supabase_webhook_secret(project_id),
         "SUPABASE_WEBHOOK_SECRETS or SUPABASE_WEBHOOK_SECRET",
     )
-    _record_connector_delivery(
-        project_id, "supabase", x_supabase_delivery or x_request_id
-    )
+    _record_connector_delivery(project_id, "supabase", delivery_id)
     payload: Any = await request.json()
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="JSON object required")
@@ -1259,7 +1560,7 @@ async def supabase_direct_webhook(
         project_id,
         "connector_evidence_ingested",
         "supabase_direct",
-        x_supabase_delivery or x_request_id or "missing_delivery_id",
+        delivery_id,
         {
             "event_id": saved["event_id"],
             "connector": "supabase",
@@ -1464,23 +1765,18 @@ async def download_postmortem(incident_id: str) -> Response:
 
 
 @app.get("/")
-async def serve_dashboard() -> FileResponse:
-    return FileResponse("frontend/dashboard.html", media_type="text/html")
-
-
-@app.get("/styles.css")
-async def serve_styles() -> FileResponse:
-    return FileResponse("frontend/styles.css", media_type="text/css")
+async def api_root() -> Dict[str, Any]:
+    return {
+        "service": "AI Operations Command Center API",
+        "status": "online",
+        "ui": os.getenv("WEB_BASE_URL", "http://localhost:3000"),
+        "docs": "/docs",
+    }
 
 
 @app.get("/sdk/immune-agent.js")
 async def serve_immune_agent_sdk() -> FileResponse:
     return FileResponse("frontend/immune-agent.js", media_type="application/javascript")
-
-
-@app.get("/incident/{incident_id}")
-async def serve_incident_detail(incident_id: str) -> FileResponse:
-    return FileResponse("frontend/incident_detail.html", media_type="text/html")
 
 
 if __name__ == "__main__":

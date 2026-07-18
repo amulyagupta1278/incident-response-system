@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,11 @@ def signed_body(payload: dict[str, Any], secret: str) -> tuple[str, str]:
     body = json.dumps(payload, separators=(",", ":")).encode()
     signature = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return body.decode(), signature
+
+
+def slack_signature(body: str, secret: str, timestamp: str) -> str:
+    base = f"v0:{timestamp}:{body}".encode()
+    return "v0=" + hmac.new(secret.encode(), base, hashlib.sha256).hexdigest()
 
 
 def test_v1_ingest_requires_project_api_key(monkeypatch: Any, tmp_path: Path) -> None:
@@ -111,6 +117,32 @@ def test_v1_service_config_endpoint(monkeypatch: Any, tmp_path: Path) -> None:
     assert response.json()["status"] == "configured"
 
 
+def test_intelligence_endpoints_require_auth_and_remain_project_scoped(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    client = make_client(monkeypatch, tmp_path)
+    created = client.post(
+        "/api/v1/incidents",
+        headers=auth("key-a"),
+        json={"service": "payment-api", "severity": "critical", "alert_description": "pool timeout"},
+    )
+    assert created.status_code == 200
+
+    assert client.get("/api/v1/analytics").status_code == 401
+    analytics = client.get("/api/v1/analytics?period=week", headers=auth("key-a"))
+    graph = client.get("/api/v1/knowledge-graph", headers=auth("key-a"))
+    catalog = client.get("/api/v1/connectors/catalog", headers=auth("key-a"))
+
+    assert analytics.status_code == 200
+    assert analytics.json()["project_id"] == "project-a"
+    assert analytics.json()["total"] == 1
+    assert graph.status_code == 200
+    assert graph.json()["project_id"] == "project-a"
+    assert "relational" in graph.json()
+    assert catalog.status_code == 200
+    assert any(item["type"] == "memgraph" for item in catalog.json()["connectors"])
+
+
 def test_connector_setup_requires_server_key_and_is_project_scoped(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -158,7 +190,7 @@ def test_readiness_is_project_scoped_and_never_leaks_secrets(
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRETS", "project-a:github-secret")
     monkeypatch.setenv("SUPABASE_WEBHOOK_SECRETS", "project-a:supabase-secret")
     monkeypatch.setenv("RAW_PAYLOAD_RETENTION_DAYS", "0")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://ops.example/db")
+    monkeypatch.setenv("ALLOW_SQLITE_IN_PRODUCTION", "true")
     client = make_client(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("GATEWAY_WORKER_ENABLED", "true")
@@ -207,6 +239,30 @@ def test_readiness_reports_blocked_production_security_gaps(
     assert "browser_origin_allowlist" in payload["missing"]
     assert "cors_allowlist" in payload["missing"]
     assert "demo_routes_disabled" in payload["missing"]
+    assert "production_database" in payload["missing"]
+
+
+def test_readiness_does_not_claim_postgres_support_without_driver(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEMO_MODE", "false")
+    monkeypatch.setenv("ALLOWED_ORIGINS", "https://ops-ui.example")
+    monkeypatch.setenv("BROWSER_ALLOWED_ORIGINS", "https://shop.example")
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRETS", "project-a:github-secret")
+    monkeypatch.setenv("SUPABASE_WEBHOOK_SECRETS", "project-a:supabase-secret")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://ops.example/db")
+    client = make_client(monkeypatch, tmp_path)
+    monkeypatch.setenv("GATEWAY_WORKER_ENABLED", "true")
+
+    response = client.get("/api/v1/readiness", headers=auth("key-a"))
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["status"] == "blocked"
+    assert payload["security"]["database_backend"] == "postgres_configured_unsupported"
+    assert "production_database" in payload["missing"]
 
 
 def test_admin_can_provision_project_without_project_env_entries(
@@ -688,13 +744,18 @@ def test_direct_github_webhook_rejects_missing_or_invalid_signature(
 
     missing = client.post(
         "/api/v1/connectors/github/project-a/webhook",
-        headers={"X-GitHub-Event": "push", "Content-Type": "application/json"},
+        headers={
+            "X-GitHub-Event": "push",
+            "X-GitHub-Delivery": "missing-signature-delivery",
+            "Content-Type": "application/json",
+        },
         content=body,
     )
     invalid = client.post(
         "/api/v1/connectors/github/project-a/webhook",
         headers={
             "X-GitHub-Event": "push",
+            "X-GitHub-Delivery": "invalid-signature-delivery",
             "X-Hub-Signature-256": "sha256=bad",
             "Content-Type": "application/json",
         },
@@ -703,6 +764,43 @@ def test_direct_github_webhook_rejects_missing_or_invalid_signature(
 
     assert missing.status_code == 401
     assert invalid.status_code == 401
+
+
+def test_direct_github_webhook_requires_existing_project_and_delivery_id(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRETS", "project-a:github-secret")
+    client = make_client(monkeypatch, tmp_path)
+    payload = {
+        "repository": {"name": "web"},
+        "after": "abc123",
+        "commits": [{"id": "abc123", "message": "change checkout flow"}],
+    }
+    body, signature = signed_body(payload, "github-secret")
+
+    missing_delivery = client.post(
+        "/api/v1/connectors/github/project-a/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    unknown_project = client.post(
+        "/api/v1/connectors/github/missing-project/webhook",
+        headers={
+            "X-GitHub-Event": "push",
+            "X-GitHub-Delivery": "unknown-project-delivery",
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+
+    assert missing_delivery.status_code == 400
+    assert unknown_project.status_code == 404
 
 
 def test_duplicate_webhook_delivery_is_rejected(
@@ -872,3 +970,89 @@ def test_direct_supabase_webhook_rejects_invalid_signature_and_duplicate(
     assert invalid.status_code == 401
     assert first.status_code == 200
     assert duplicate.status_code == 409
+
+
+def test_direct_supabase_webhook_requires_existing_project_and_delivery_id(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONNECTOR_SIGNATURES_REQUIRED", "true")
+    monkeypatch.setenv("SUPABASE_WEBHOOK_SECRETS", "project-a:supabase-secret")
+    client = make_client(monkeypatch, tmp_path)
+    payload = {"service": "db", "type": "auth_event", "message": "auth failures rising"}
+    body, signature = signed_body(payload, "supabase-secret")
+
+    missing_delivery = client.post(
+        "/api/v1/connectors/supabase/project-a/webhook",
+        headers={
+            "X-Supabase-Signature": signature,
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    unknown_project = client.post(
+        "/api/v1/connectors/supabase/missing-project/webhook",
+        headers={
+            "X-Supabase-Delivery": "unknown-project-delivery",
+            "X-Supabase-Signature": signature,
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+
+    assert missing_delivery.status_code == 400
+    assert unknown_project.status_code == 404
+
+
+def test_slack_command_requires_valid_signature(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "slack-secret")
+    monkeypatch.setenv("SLACK_PROJECT_ID", "project-a")
+    client = make_client(monkeypatch, tmp_path)
+    body = "text=status"
+    timestamp = str(int(time.time()))
+
+    missing_signature = client.post(
+        "/api/slack/commands",
+        headers={
+            "X-Slack-Request-Timestamp": timestamp,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        content=body,
+    )
+    invalid_signature = client.post(
+        "/api/slack/commands",
+        headers={
+            "X-Slack-Request-Timestamp": timestamp,
+            "X-Slack-Signature": "v0=bad",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        content=body,
+    )
+
+    assert missing_signature.status_code == 401
+    assert invalid_signature.status_code == 401
+
+
+def test_slack_command_accepts_valid_signature_and_project_scope(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "slack-secret")
+    monkeypatch.setenv("SLACK_PROJECT_ID", "project-a")
+    client = make_client(monkeypatch, tmp_path)
+    body = "text=status"
+    timestamp = str(int(time.time()))
+    signature = slack_signature(body, "slack-secret", timestamp)
+
+    response = client.post(
+        "/api/slack/commands",
+        headers={
+            "X-Slack-Request-Timestamp": timestamp,
+            "X-Slack-Signature": signature,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        content=body,
+    )
+
+    assert response.status_code == 200
+    assert "No incidents found" in response.json()["text"]

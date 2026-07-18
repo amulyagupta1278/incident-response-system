@@ -149,6 +149,13 @@ async def test_agentic_graph_completes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(result.executive_summary) > 0
     assert result.current_status == "complete"
     assert "summary" in result.completed_steps
+    assert "deployment_analysis" in result.completed_steps
+    assert result.deployment_analysis.get("deployment_count", 0) >= 0
+    assert result.debate_rounds
+    assert "stakeholder_updates" in result.completed_steps
+    assert result.stakeholder_updates.get("engineering")
+    assert "recovery_recommendations" in result.completed_steps
+    assert result.recovery_plan.get("steps")
 
 
 @pytest.mark.asyncio

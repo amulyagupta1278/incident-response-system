@@ -19,9 +19,12 @@ ACTION_DESCRIPTIONS: Dict[str, str] = {
     "load_data": "Fetch raw logs, metrics, and deployment history for the incident service",
     "analyze_logs": "Scan raw logs for error patterns (timeouts, connection errors, GC pauses)",
     "analyze_metrics": "Compare baseline vs incident metrics to find spikes",
+    "analyze_deployments": "Correlate recent deployments and configuration changes with incident timing",
     "run_rca": "Synthesize all evidence into a root cause hypothesis with confidence",
     "request_more_data": "Confidence is low - gather deeper evidence and re-run RCA",
     "calculate_business_impact": "Quantify affected users and revenue impact",
+    "generate_stakeholder_updates": "Prepare risk, troubleshooting, and stakeholder communication plans",
+    "generate_recovery_plan": "Generate prioritized, risk-tagged recovery actions",
     "generate_summary": "Produce engineering and executive summaries",
     "complete": "All analysis steps are done - finish the investigation",
 }
@@ -39,19 +42,28 @@ def valid_next_actions(state: IncidentState) -> List[str]:
     candidates: List[str] = []
     logs_done: bool = "log_analysis" in state.completed_steps
     metrics_done: bool = "metrics_analysis" in state.completed_steps
+    deployments_done: bool = "deployment_analysis" in state.completed_steps
     rca_done: bool = "rca_analysis" in state.completed_steps
 
     if not logs_done:
         candidates.append("analyze_logs")
     if not metrics_done:
         candidates.append("analyze_metrics")
-    if logs_done and metrics_done and not rca_done:
+    if logs_done and metrics_done and not deployments_done and not rca_done:
+        candidates.append("analyze_deployments")
+    if logs_done and metrics_done and deployments_done and not rca_done:
         candidates.append("run_rca")
     if rca_done:
         if state.rca_confidence < 0.7 and state.analysis_iterations < state.max_iterations:
             candidates.append("request_more_data")
+        elif "summary" in state.completed_steps:
+            candidates.append("complete")
         elif "business_impact" not in state.completed_steps:
             candidates.append("calculate_business_impact")
+        elif "stakeholder_updates" not in state.completed_steps:
+            candidates.append("generate_stakeholder_updates")
+        elif "recovery_recommendations" not in state.completed_steps:
+            candidates.append("generate_recovery_plan")
         elif "summary" not in state.completed_steps:
             candidates.append("generate_summary")
         else:
@@ -69,12 +81,20 @@ def route_next_action(state: IncidentState) -> str:
         decision = "analyze_logs"
     elif "metrics_analysis" not in state.completed_steps:
         decision = "analyze_metrics"
+    elif "deployment_analysis" not in state.completed_steps and "rca_analysis" not in state.completed_steps:
+        decision = "analyze_deployments"
     elif "rca_analysis" not in state.completed_steps:
         decision = "run_rca"
     elif state.rca_confidence < 0.7 and state.analysis_iterations < state.max_iterations:
         decision = "request_more_data"
+    elif "summary" in state.completed_steps:
+        decision = "complete"
     elif "business_impact" not in state.completed_steps:
         decision = "calculate_business_impact"
+    elif "stakeholder_updates" not in state.completed_steps:
+        decision = "generate_stakeholder_updates"
+    elif "recovery_recommendations" not in state.completed_steps:
+        decision = "generate_recovery_plan"
     elif "summary" not in state.completed_steps:
         decision = "generate_summary"
     else:

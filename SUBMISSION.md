@@ -29,7 +29,7 @@ A common approach to automated incident response is either a single LLM prompt w
 | LLM unavailable | System fails or degrades silently | Deterministic heuristic fallback — identical output structure, fully offline-capable |
 | Memory | None — every incident starts from zero | Persists and matches past incidents by root cause and anomaly signature |
 | Automation boundary | Model output is treated as final | Investigation is autonomous; every recovery action requires explicit human approval before being actionable |
-| Observability | Final answer only | Full live-streaming audit trail with per-step reasoning and source (`llm:gpt-4o` / `heuristic` / `guardrail`) |
+| Observability | Final answer only | Full live-streaming audit trail with per-step reasoning and Codex runtime source (`llm:gpt-4o` / `heuristic` / `guardrail`) |
 
 ## Architecture at a Glance
 
@@ -95,7 +95,7 @@ Click a scenario button, then open the incident while it's still running — wat
 
 ## Tech Stack
 
-Python · LangGraph · FastAPI (async streaming background task) · OpenAI `gpt-4o` (strict JSON schema mode) · typed state dataclass · pytest · vanilla HTML/CSS/JS (no build step required).
+Python · LangGraph · FastAPI (async streaming background task) · Codex agent reasoning backed by OpenAI `gpt-4o` (strict JSON schema mode) · typed state dataclass · pytest · vanilla HTML/CSS/JS (no build step required).
 
 ## Roadmap
 

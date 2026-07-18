@@ -55,6 +55,7 @@ def log_analysis(state: IncidentState) -> IncidentState:
                 "count": 0,
                 "severity": severity,
                 "evidence": [],
+                "evidence_refs": [],
                 "first_seen": log_entry.get("timestamp"),
                 "last_seen": log_entry.get("timestamp"),
                 "levels": {},
@@ -65,6 +66,14 @@ def log_analysis(state: IncidentState) -> IncidentState:
             error_types[pattern]["levels"].get(level, 0) + 1
         )
         error_types[pattern]["evidence"].append(log_entry.get("message", ""))
+        if log_entry.get("evidence_id"):
+            error_types[pattern]["evidence_refs"].append(
+                {
+                    "evidence_id": log_entry.get("evidence_id"),
+                    "message": log_entry.get("message", ""),
+                    "timestamp": log_entry.get("timestamp"),
+                }
+            )
         timeline.append(
             {
                 "timestamp": log_entry.get("timestamp"),
@@ -96,6 +105,7 @@ def log_analysis(state: IncidentState) -> IncidentState:
             "incident_count": details["count"],
             "spike_factor": details["count"] if details["count"] > 1 else 1,
             "evidence": details["evidence"][:3],
+            "evidence_refs": details["evidence_refs"][:3],
             "first_seen": details["first_seen"],
             "last_seen": details["last_seen"],
             "levels": details["levels"],

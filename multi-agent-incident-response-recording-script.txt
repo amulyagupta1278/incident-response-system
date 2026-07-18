@@ -1,0 +1,32 @@
+Multi-Agent Incident Response Workflow — Recording Script
+Generated for the AI Operations Command Center demo.
+
+Slide 1
+Welcome. This demo walks through a multi-agent AI incident response system. The core idea is simple: when a critical production alert fires, agents investigate and summarize, but humans still review and decide. We will follow one incident from signal to evidence, review, remediation, trace, and postmortem.
+
+Slide 2
+The problem this system solves is incident overload. In a real outage, logs, metrics, deployments, user impact, and historical context are scattered. The agents compress that investigation into a structured RCA, while the UI keeps the workflow governed and auditable.
+
+Slide 3
+At a system level, the Next.js PWA is the command surface. It calls a FastAPI backend through typed endpoints. The backend returns a structured incident record containing the root cause, evidence catalog, quality gates, agent invocations, review events, and recommendations.
+
+Slide 4
+The incident moves through five phases: launch, investigate, explain, govern, and recover. This is the spine of the demo. We are not just showing screens; we are showing how an alert becomes an evidence-backed operational decision.
+
+Slide 5
+The multi-agent layer acts like an assembly line. One stage normalizes the signal, another gathers evidence, another synthesizes RCA, another proposes remediation and quality gates, and the trace layer records each span so we can inspect what happened.
+
+Slide 6
+On the dashboard, choose one scenario. I recommend DB Pool Exhaustion because the story is easy to follow. Notice the live queue, current status, confidence indicator, and history grouping. This keeps the operator focused on what needs action now.
+
+Slide 7
+Inside the incident detail page, start on overview. Explain the root-cause hypothesis, confidence, affected users, lifecycle, executive summary, and engineering notes. Then open evidence and show that claims are linked back to raw facts in the evidence catalog.
+
+Slide 8
+The review tab is where governance happens. The reviewer can accept, reject, mark evidence insufficient, request more data, or override the RCA. Remediation is approved or rejected step by step, so automation proposes but does not silently act.
+
+Slide 9
+For the actual recording, keep the path tight: dashboard, launch, overview, evidence, review, trace, and postmortem. If the system takes a moment, explain that the UI polls for updates while the agents continue working.
+
+Slide 10
+The final message is that this is agent-assisted incident command, not autonomous firefighting. Agents speed up investigation, but evidence, traceability, and human decisions make the workflow trustworthy enough for operations.

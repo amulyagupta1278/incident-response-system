@@ -1,0 +1,35 @@
+[
+  {
+    "id": "demo-cache-stampede-postmortem",
+    "title": "Search API Cache Stampede - Demo Postmortem",
+    "kind": "postmortem",
+    "tags": ["search-api", "cache-stampede", "retry-storm", "demo", "incident"],
+    "embedding_text": "search-api latency incident cache stampede thundering herd synchronized TTL expiry cache miss amplification retry storm high cost similar incident",
+    "content": "At 19:09 UTC the search-api experienced a cache stampede. Traffic increased from 900 to 4,800 QPS, latency rose from 45 ms to 1,400 ms, error rate reached 19%, and infrastructure cost increased from $20 to $120 per minute. With 36,000 service users, the observed error rate corresponds to approximately 6,840 affected users and an estimated $171 per minute of revenue impact. No deployment occurred in the incident window. The evidence supports cache miss amplification followed by retries, not a database pool or memory failure."
+  },
+  {
+    "id": "demo-cache-stampede-runbook",
+    "title": "Cache Stampede Response Runbook",
+    "kind": "runbook",
+    "tags": ["search-api", "cache", "redis", "remediation", "runbook"],
+    "embedding_text": "how to fix cache stampede redis thundering herd retry amplification latency mitigation remediation request coalescing single flight TTL jitter stale while revalidate",
+    "content": "Confirm a stampede by correlating a sudden cache-miss increase with origin QPS, retry volume, latency, and error rate while checking that no deployment or database errors explain the event. Immediate actions: enable request coalescing or single-flight locking; serve stale values while revalidating; cap retries with exponential backoff and jitter; rate-limit the hot path; and pre-warm the highest-volume keys. Prevention: add randomized TTL jitter, soft-expiration, negative caching, retry budgets, and alerts on cache-miss amplification. Recovery is complete when latency and error rate remain near baseline for 15 minutes and origin QPS is stable."
+  },
+  {
+    "id": "demo-cache-stampede-similar-incidents",
+    "title": "Similar Incident Matching Guide - Cache and Traffic",
+    "kind": "similar-incident",
+    "tags": ["similar-incident", "cache-stampede", "traffic-surge", "diagnosis"],
+    "embedding_text": "similar historical incidents distinguish cache stampede from organic traffic surge database pool exhaustion memory leak cascading timeout",
+    "content": "A cache stampede resembles an organic traffic surge because both raise QPS, latency, and cost. Prefer the cache-stampede diagnosis when cache misses and retries rise together, hot keys expire at the same time, and there is no matching deployment. Prefer organic traffic surge when incoming client demand rises without cache-miss amplification. Database pool exhaustion requires connection-acquisition errors; memory leaks require sustained heap growth and garbage-collection pressure; cascading timeouts require a degraded downstream dependency."
+  },
+  {
+    "id": "demo-search-api-service-profile",
+    "title": "Search API Service and Impact Profile",
+    "kind": "service-profile",
+    "tags": ["search-api", "business-impact", "slo", "ownership"],
+    "embedding_text": "search-api users revenue impact SLO latency error budget owner escalation",
+    "content": "The search-api supports 36,000 users and uses $0.025 revenue per affected user per minute for bounded demo impact estimates. Its normal latency is 45 ms and the demo incident threshold is 500 ms. Escalate to Search Platform when latency exceeds 500 ms for five minutes, cache-miss rate exceeds 35%, or retries exceed the configured budget. Business and FinOps owners must be notified when incremental infrastructure cost exceeds $75 per minute."
+  }
+]
+

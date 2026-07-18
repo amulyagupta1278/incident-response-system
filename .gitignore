@@ -68,12 +68,17 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite3-*
 instance/
 
 # Node
 node_modules/
 package-lock.json
+!web/package-lock.json
 yarn.lock
+.npm-cache/
+.next/
+*.tsbuildinfo
 
 # Temp
 *.tmp
@@ -84,3 +89,4 @@ yarn.lock
 data/incident_memory.json
 data/live_logs/
 data/kaggle/
+data/uploads/

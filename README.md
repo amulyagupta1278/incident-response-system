@@ -1,6 +1,21 @@
 # AI Operations Command Center
 
+[![CI](https://github.com/amulyagupta1278/incident-response-system/actions/workflows/ci.yml/badge.svg)](https://github.com/amulyagupta1278/incident-response-system/actions/workflows/ci.yml)
+
 Autonomous Multi-Agent Incident Response System
+
+## Reproduce and verify
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pytest -q
+python -m evals
+```
+
+Tests run without provider credentials through deterministic fallbacks. Live-provider evaluation
+requires separately configured credentials and is not part of the default reproducibility check.
 
 ## Unified Super-Repo
 
